@@ -1,0 +1,20 @@
+==================================================
+  ConvertFlow - Software Nativo de Conversão
+==================================================
+
+1. COMO USAR:
+- Dê dois cliques em "ConvertFlow.exe" para abrir o aplicativo.
+- Não precisa instalar Node.js, Python ou qualquer outra ferramenta.
+- Não abre navegador de internet e não usa localhost. É 100% nativo e offline!
+
+2. COMO CONVERTER:
+- Arraste qualquer arquivo (CSV, OFX, Excel, TXT) e solte na janela.
+- Escolha o formato desejado (OFX, PDF, TXT, CSV).
+- Clique no botão "CONVERTER ARQUIVO".
+
+3. ONDE É SALVO:
+- Todos os arquivos convertidos são salvos automaticamente na sua pasta:
+  Documentos\Arquivos_Convertidos
+
+4. COMO LEVAR PARA OUTRO COMPUTADOR:
+- Basta copiar o arquivo "ConvertFlow.exe" para um pendrive ou enviar por e-mail/Drive e abrir em qualquer computador com Windows (7, 8, 10 ou 11).

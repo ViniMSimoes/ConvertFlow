@@ -1,0 +1,14 @@
+# Arquivos de configuracao local
+totvs_config.ini
+*.tmp
+*.log
+
+# IDEs e Editores
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Windows
+Thumbs.db
+Desktop.ini
