@@ -44,6 +44,11 @@ namespace ConvertFlow
         private TextBox txtBanco;
         private TextBox txtAgencia;
         private TextBox txtConta;
+        private Border baixaConfigBorder;
+        private TextBox txtFilial;
+        private TextBox txtTipoDoc;
+        private TextBox txtContaCaixa;
+        private TextBox txtFormaPgto;
         private Button convertButton;
         private Border resultPanel;
         private TextBlock resultPathText;
@@ -54,9 +59,9 @@ namespace ConvertFlow
         {
             Title = "ConvertFlow - Conversor de Arquivos (Padrão TOTVS RM)";
             Width = 640;
-            Height = 600;
+            Height = 630;
             MinWidth = 550;
-            MinHeight = 520;
+            MinHeight = 550;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)); // #0e0e11
 
@@ -170,7 +175,7 @@ namespace ConvertFlow
             };
             TextBlock dropSub = new TextBlock()
             {
-                Text = "Suporta CSV, OFX, Excel (.xlsx/.xls), TXT",
+                Text = "Suporta Retorno CNAB (TXT/RET), CSV, OFX, Excel (.xlsx/.xls)",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -293,6 +298,71 @@ namespace ConvertFlow
             totvsStack.Children.Add(bankGrid);
             totvsConfigBorder.Child = totvsStack;
             fileInfoPanel.Children.Add(totvsConfigBorder);
+
+            // CONFIGURAÇÃO BAIXA TOTVS RM (Aparece quando BAIXA está selecionado)
+            baixaConfigBorder = new Border()
+            {
+                Background = new SolidColorBrush(Color.FromRgb(18, 18, 22)),
+                BorderBrush = new SolidColorBrush(Color.FromRgb(39, 39, 42)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12, 10, 12, 10),
+                Margin = new Thickness(0, 12, 0, 0),
+                Visibility = Visibility.Collapsed
+            };
+
+            StackPanel baixaStack = new StackPanel();
+            TextBlock baixaTitle = new TextBlock()
+            {
+                Text = "Parâmetros de Importação da Baixa TOTVS RM (Linha L):",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            baixaStack.Children.Add(baixaTitle);
+
+            Grid baixaGrid = new Grid();
+            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1.2, GridUnitType.Star) });
+            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+
+            // Campo Filial
+            StackPanel filCol = new StackPanel() { Margin = new Thickness(0, 0, 5, 0) };
+            filCol.Children.Add(new TextBlock() { Text = "Filial (CODFILIAL)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
+            txtFilial = new TextBox() { Text = "0002", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
+            filCol.Children.Add(txtFilial);
+            Grid.SetColumn(filCol, 0);
+            baixaGrid.Children.Add(filCol);
+
+            // Campo Tipo Doc
+            StackPanel tdCol = new StackPanel() { Margin = new Thickness(5, 0, 5, 0) };
+            tdCol.Children.Add(new TextBlock() { Text = "Tipo Doc (CODTIPODOC)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
+            txtTipoDoc = new TextBox() { Text = "IGRA", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
+            tdCol.Children.Add(txtTipoDoc);
+            Grid.SetColumn(tdCol, 1);
+            baixaGrid.Children.Add(tdCol);
+
+            // Campo Conta Caixa
+            StackPanel ccCol = new StackPanel() { Margin = new Thickness(5, 0, 5, 0) };
+            ccCol.Children.Add(new TextBlock() { Text = "Conta Caixa (CODCONTA)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
+            txtContaCaixa = new TextBox() { Text = "1", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
+            ccCol.Children.Add(txtContaCaixa);
+            Grid.SetColumn(ccCol, 2);
+            baixaGrid.Children.Add(ccCol);
+
+            // Campo Forma Pgto
+            StackPanel fpCol = new StackPanel() { Margin = new Thickness(5, 0, 0, 0) };
+            fpCol.Children.Add(new TextBlock() { Text = "Forma Pgto", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
+            txtFormaPgto = new TextBox() { Text = "12", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
+            fpCol.Children.Add(txtFormaPgto);
+            Grid.SetColumn(fpCol, 3);
+            baixaGrid.Children.Add(fpCol);
+
+            baixaStack.Children.Add(baixaGrid);
+            baixaConfigBorder.Child = baixaStack;
+            fileInfoPanel.Children.Add(baixaConfigBorder);
 
             // BOTAO CONVERTER
             convertButton = new Button()
@@ -431,6 +501,10 @@ namespace ConvertFlow
                         if (line.StartsWith("BANCO=")) txtBanco.Text = line.Substring(6).Trim();
                         else if (line.StartsWith("AGENCIA=")) txtAgencia.Text = line.Substring(8).Trim();
                         else if (line.StartsWith("CONTA=")) txtConta.Text = line.Substring(6).Trim();
+                        else if (line.StartsWith("FILIAL=")) txtFilial.Text = line.Substring(7).Trim();
+                        else if (line.StartsWith("TIPODOC=")) txtTipoDoc.Text = line.Substring(8).Trim();
+                        else if (line.StartsWith("CONTACAIXA=")) txtContaCaixa.Text = line.Substring(11).Trim();
+                        else if (line.StartsWith("FORMAPGTO=")) txtFormaPgto.Text = line.Substring(10).Trim();
                     }
                 }
             }
@@ -441,10 +515,14 @@ namespace ConvertFlow
         {
             try
             {
-                string content = string.Format("BANCO={0}\r\nAGENCIA={1}\r\nCONTA={2}\r\n",
+                string content = string.Format("BANCO={0}\r\nAGENCIA={1}\r\nCONTA={2}\r\nFILIAL={3}\r\nTIPODOC={4}\r\nCONTACAIXA={5}\r\nFORMAPGTO={6}\r\n",
                     txtBanco.Text.Trim(),
                     txtAgencia.Text.Trim(),
-                    txtConta.Text.Trim()
+                    txtConta.Text.Trim(),
+                    txtFilial.Text.Trim(),
+                    txtTipoDoc.Text.Trim(),
+                    txtContaCaixa.Text.Trim(),
+                    txtFormaPgto.Text.Trim()
                 );
                 File.WriteAllText(configPath, content);
             }
@@ -484,7 +562,7 @@ namespace ConvertFlow
         private void OpenFileDialogPrompt()
         {
             OpenFileDialog dlg = new OpenFileDialog();
-            dlg.Filter = "Arquivos Suportados (*.csv;*.ofx;*.xlsx;*.xls;*.txt)|*.csv;*.ofx;*.xlsx;*.xls;*.txt|Todos os Arquivos (*.*)|*.*";
+            dlg.Filter = "Arquivos Suportados (*.txt;*.ret;*.rem;*.csv;*.ofx;*.xlsx;*.xls)|*.txt;*.ret;*.rem;*.csv;*.ofx;*.xlsx;*.xls|Arquivos de Retorno CNAB / Texto (*.txt;*.ret;*.rem)|*.txt;*.ret;*.rem|Planilhas CSV (*.csv)|*.csv|Extratos OFX (*.ofx)|*.ofx|Planilhas Excel (*.xlsx;*.xls)|*.xlsx;*.xls|Todos os Arquivos (*.*)|*.*";
             if (dlg.ShowDialog() == true)
             {
                 LoadSelectedFile(dlg.FileName);
@@ -506,9 +584,17 @@ namespace ConvertFlow
             formatRadios.Clear();
 
             List<string> options = new List<string>();
-            if (detectedExtension == "csv")
+            if (detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem")
+            {
+                options.Add("BAIXA");
+                options.Add("OFX");
+                options.Add("XLSX");
+                options.Add("CSV");
+            }
+            else if (detectedExtension == "csv")
             {
                 options.Add("OFX");
+                options.Add("BAIXA");
                 options.Add("XLSX");
                 options.Add("PDF");
                 options.Add("TXT");
@@ -523,12 +609,14 @@ namespace ConvertFlow
             else if (detectedExtension == "xlsx" || detectedExtension == "xls")
             {
                 options.Add("OFX");
+                options.Add("BAIXA");
                 options.Add("CSV");
                 options.Add("PDF");
                 options.Add("TXT");
             }
             else
             {
+                options.Add("BAIXA");
                 options.Add("OFX");
                 options.Add("XLSX");
                 options.Add("PDF");
@@ -540,9 +628,15 @@ namespace ConvertFlow
             for (int i = 0; i < options.Count; i++)
             {
                 string fmt = options[i];
+                string desc = (fmt == "BAIXA" ? " (Baixa TOTVS RM)" :
+                               fmt == "OFX" ? " (Extrato TOTVS)" :
+                               fmt == "XLSX" ? " (Excel)" :
+                               fmt == "PDF" ? " (Documento)" :
+                               fmt == "CSV" ? " (Planilha CSV)" :
+                               fmt == "TXT" ? " (Texto)" : "");
                 RadioButton rb = new RadioButton()
                 {
-                    Content = fmt + (fmt == "OFX" ? " (Extrato TOTVS)" : fmt == "XLSX" ? " (Excel)" : fmt == "PDF" ? " (Documento)" : fmt == "TXT" ? " (Texto)" : ""),
+                    Content = fmt + desc,
                     Foreground = Brushes.White,
                     FontSize = 12,
                     FontWeight = FontWeights.SemiBold,
@@ -555,12 +649,14 @@ namespace ConvertFlow
                 {
                     targetFormat = (string)((RadioButton)s).Tag;
                     totvsConfigBorder.Visibility = (targetFormat == "OFX") ? Visibility.Visible : Visibility.Collapsed;
+                    baixaConfigBorder.Visibility = (targetFormat == "BAIXA") ? Visibility.Visible : Visibility.Collapsed;
                 };
                 formatRadios.Add(rb);
                 formatOptionsPanel.Children.Add(rb);
             }
 
             totvsConfigBorder.Visibility = (targetFormat == "OFX") ? Visibility.Visible : Visibility.Collapsed;
+            baixaConfigBorder.Visibility = (targetFormat == "BAIXA") ? Visibility.Visible : Visibility.Collapsed;
             dropZone.Visibility = Visibility.Collapsed;
             fileInfoPanel.Visibility = Visibility.Visible;
             resultPanel.Visibility = Visibility.Collapsed;
@@ -588,33 +684,60 @@ namespace ConvertFlow
                 string banco = string.IsNullOrEmpty(txtBanco.Text.Trim()) ? "001" : txtBanco.Text.Trim();
                 string agencia = string.IsNullOrEmpty(txtAgencia.Text.Trim()) ? "0001" : txtAgencia.Text.Trim();
                 string conta = string.IsNullOrEmpty(txtConta.Text.Trim()) ? "123456" : txtConta.Text.Trim();
+                string filial = string.IsNullOrEmpty(txtFilial.Text.Trim()) ? "0002" : txtFilial.Text.Trim();
+                string tipoDoc = string.IsNullOrEmpty(txtTipoDoc.Text.Trim()) ? "IGRA" : txtTipoDoc.Text.Trim();
+                string contaCaixa = string.IsNullOrEmpty(txtContaCaixa.Text.Trim()) ? "1" : txtContaCaixa.Text.Trim();
+                string formaPgto = string.IsNullOrEmpty(txtFormaPgto.Text.Trim()) ? "12" : txtFormaPgto.Text.Trim();
 
                 string baseName = Path.GetFileNameWithoutExtension(selectedFilePath);
                 string timeTag = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string outExt = targetFormat.ToLower();
-                string outputFileName = string.Format("{0}_convertido_{1}.{2}", baseName, timeTag, outExt);
+                string outputFileName;
+                if (targetFormat == "BAIXA")
+                {
+                    outputFileName = string.Format("BAIXA_{0}_{1}.txt", baseName, timeTag);
+                }
+                else
+                {
+                    outputFileName = string.Format("{0}_convertido_{1}.{2}", baseName, timeTag, outExt);
+                }
                 string outputPath = Path.Combine(documentsDir, outputFileName);
 
-                if (detectedExtension == "csv" && targetFormat == "OFX")
+                if (targetFormat == "BAIXA")
+                {
+                    string baixaContent = "";
+                    if (detectedExtension == "xlsx" || detectedExtension == "xls")
+                    {
+                        var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
+                        baixaContent = CnabToBaixaConverter.ConvertTableToBaixa(rows, filial, tipoDoc, contaCaixa, formaPgto);
+                    }
+                    else
+                    {
+                        string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
+                        baixaContent = CnabToBaixaConverter.ConvertToBaixa(rawText, filial, tipoDoc, contaCaixa, formaPgto);
+                    }
+                    File.WriteAllText(outputPath, baixaContent, new UTF8Encoding(true));
+                }
+                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "OFX")
                 {
                     string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                     string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csvContent, banco, agencia, conta);
                     File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
                 }
-                else if (detectedExtension == "csv" && targetFormat == "XLSX")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "XLSX")
                 {
                     string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                     char delim = CsvToOfxConverter.DetectDelimiter(csvContent);
                     var rows = CsvToOfxConverter.ParseCsv(csvContent, delim);
                     SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
                 }
-                else if (detectedExtension == "csv" && targetFormat == "TXT")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "TXT")
                 {
                     string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                     string txt = TableFormatter.CsvToAlignedTxt(csvContent);
                     File.WriteAllText(outputPath, txt, Encoding.UTF8);
                 }
-                else if (detectedExtension == "csv" && targetFormat == "PDF")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "PDF")
                 {
                     string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                     SimplePdfWriter.WriteCsvToPdf(csvContent, outputPath, baseName);
@@ -932,7 +1055,7 @@ namespace ConvertFlow
             return result;
         }
 
-        private static string Normalize(string s)
+        public static string Normalize(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
             return s.ToLower()
@@ -945,7 +1068,7 @@ namespace ConvertFlow
                 .Trim();
         }
 
-        private static bool MatchAny(string text, string[] aliases)
+        public static bool MatchAny(string text, string[] aliases)
         {
             foreach (string a in aliases)
             {
@@ -954,7 +1077,7 @@ namespace ConvertFlow
             return false;
         }
 
-        private static string ParseDate(string dateStr)
+        public static string ParseDate(string dateStr)
         {
             if (string.IsNullOrEmpty(dateStr)) return null;
             dateStr = dateStr.Replace("\"", "").Trim();
@@ -977,7 +1100,7 @@ namespace ConvertFlow
             return DateTime.Now.ToString("yyyyMMdd");
         }
 
-        private static decimal ParseAmount(string valStr)
+        public static decimal ParseAmount(string valStr)
         {
             if (string.IsNullOrEmpty(valStr)) return 0;
             string s = valStr.Replace("R$", "").Replace(" ", "").Trim();
@@ -1578,6 +1701,486 @@ namespace ConvertFlow
                 sb.AppendLine(string.Join(delimiter, escapedCells.ToArray()));
             }
             return sb.ToString();
+        }
+    }
+
+    // =========================================================================
+    // CONVERSOR CNAB / CSV -> LAYOUT BAIXA TOTVS RM (937 CARACTERES, LINHA L)
+    // =========================================================================
+    public static class CnabToBaixaConverter
+    {
+        public static string ConvertToBaixa(string rawText, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            if (string.IsNullOrEmpty(rawText)) return "";
+
+            string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            List<string> lines = new List<string>();
+            foreach (string l in rawLines)
+            {
+                string t = l.TrimEnd();
+                if (!string.IsNullOrEmpty(t)) lines.Add(t);
+            }
+
+            if (lines.Count == 0) return "";
+
+            // 1. Tenta CNAB 240 (Segmentos A+B ou T+U)
+            bool isCnab240 = false;
+            foreach (string l in lines)
+            {
+                if (l.Length >= 14 && l.Substring(7, 1) == "3")
+                {
+                    isCnab240 = true;
+                    break;
+                }
+            }
+
+            if (isCnab240)
+            {
+                string res = ConvertCnab240(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                if (!string.IsNullOrEmpty(res)) return res;
+            }
+
+            // 2. Tenta CNAB 400 (Linha detalhe inicia com '1' e comprimento >= 400)
+            bool isCnab400 = false;
+            foreach (string l in lines)
+            {
+                if (l.Length >= 400 && l.StartsWith("1"))
+                {
+                    isCnab400 = true;
+                    break;
+                }
+            }
+
+            if (isCnab400)
+            {
+                string res = ConvertCnab400(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                if (!string.IsNullOrEmpty(res)) return res;
+            }
+
+            // 3. Fallback: Arquivo delimitado tabular (CSV / TXT)
+            char delim = CsvToOfxConverter.DetectDelimiter(rawText);
+            List<List<string>> rows = CsvToOfxConverter.ParseCsv(rawText, delim);
+            return ConvertTableToBaixa(rows, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+        }
+
+        private static string ConvertCnab240(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            List<string> resultLines = new List<string>();
+
+            // Busca pares Segmento A + Segmento B (Pagamento a Fornecedores / Favorecidos)
+            string curA = null;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string l = lines[i];
+                if (l.Length >= 14 && l.Substring(7, 1) == "3")
+                {
+                    string seg = l.Substring(13, 1);
+                    if (seg == "A")
+                    {
+                        curA = l;
+                    }
+                    else if (seg == "B" && curA != null)
+                    {
+                        string lineBx = BuildFromSegmentAB(curA, l, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                        resultLines.Add(lineBx);
+                        curA = null;
+                    }
+                }
+            }
+
+            // Se não encontrou pares A+B, busca pares T+U (Cobrança Bancária / Recebimento)
+            if (resultLines.Count == 0)
+            {
+                string curT = null;
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    string l = lines[i];
+                    if (l.Length >= 14 && l.Substring(7, 1) == "3")
+                    {
+                        string seg = l.Substring(13, 1);
+                        if (seg == "T")
+                        {
+                            curT = l;
+                        }
+                        else if (seg == "U" && curT != null)
+                        {
+                            string lineBx = BuildFromSegmentTU(curT, l, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                            resultLines.Add(lineBx);
+                            curT = null;
+                        }
+                    }
+                }
+            }
+
+            // Se ainda não encontrou pares, processa Segmentos A individuais
+            if (resultLines.Count == 0)
+            {
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    string l = lines[i];
+                    if (l.Length >= 14 && l.Substring(7, 1) == "3" && l.Substring(13, 1) == "A")
+                    {
+                        string lineBx = BuildFromSegmentAB(l, null, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                        resultLines.Add(lineBx);
+                    }
+                }
+            }
+
+            if (resultLines.Count == 0) return "";
+            return string.Join("\r\n", resultLines.ToArray()) + "\r\n";
+        }
+
+        private static string BuildFromSegmentAB(string segA, string segB, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            // Segmento A: Dados do favorecido, documento, data e valor
+            string numDoc = segA.Length >= 93 ? segA.Substring(73, Math.Min(20, segA.Length - 73)).Trim() : "";
+            string dtPgto = segA.Length >= 162 ? segA.Substring(154, 8).Trim() : (segA.Length >= 101 ? segA.Substring(93, 8).Trim() : "");
+            string dtBaixa6 = "";
+            if (dtPgto.Length == 8)
+            {
+                dtBaixa6 = dtPgto.Substring(0, 4) + dtPgto.Substring(6, 2);
+            }
+            else if (dtPgto.Length == 6)
+            {
+                dtBaixa6 = dtPgto;
+            }
+            else
+            {
+                dtBaixa6 = DateTime.Now.ToString("ddMMyy");
+            }
+
+            long cents = 0;
+            if (segA.Length >= 177)
+            {
+                long.TryParse(segA.Substring(162, 15).Trim(), out cents);
+            }
+            if (cents == 0 && segA.Length >= 134)
+            {
+                long.TryParse(segA.Substring(119, 15).Trim(), out cents);
+            }
+            decimal vlrReal = (decimal)cents / 100m;
+
+            string favorecido = segA.Length >= 73 ? segA.Substring(43, Math.Min(30, segA.Length - 43)).Trim() : "";
+
+            // Segmento B: CPF/CNPJ e valores adicionais (desconto, juros, multa)
+            string cpfCnpj = "";
+            decimal juros = 0m;
+            decimal desconto = 0m;
+            decimal multa = 0m;
+
+            if (segB != null)
+            {
+                string tipoInsc = segB.Length >= 18 ? segB.Substring(17, 1) : "1";
+                string rawDoc = segB.Length >= 32 ? segB.Substring(18, 14).Trim() : "";
+                if (tipoInsc == "1" && rawDoc.Length >= 11)
+                {
+                    cpfCnpj = rawDoc.Substring(rawDoc.Length - 11);
+                }
+                else
+                {
+                    cpfCnpj = rawDoc;
+                }
+
+                if (segB.Length >= 180) desconto = ParseMoneyCents(segB.Substring(165, 15));
+                if (segB.Length >= 195) juros = ParseMoneyCents(segB.Substring(180, 15));
+                if (segB.Length >= 210) multa = ParseMoneyCents(segB.Substring(195, 15));
+
+                if (string.IsNullOrEmpty(numDoc) && segB.Length >= 225)
+                {
+                    numDoc = segB.Substring(210, 15).Trim();
+                }
+            }
+
+            return BuildBaixaLine(
+                codFilial,
+                cpfCnpj,
+                codTipoDoc,
+                numDoc,
+                dtBaixa6,
+                vlrReal,
+                juros,
+                desconto,
+                multa,
+                codContaCaixa,
+                favorecido,
+                idFormaPgto,
+                "DEPÓSITO"
+            );
+        }
+
+        private static string BuildFromSegmentTU(string segT, string segU, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            // Segmento T: Nosso Número e Valor Nominal
+            string numDoc = "";
+            if (segT.Length >= 73)
+            {
+                numDoc = segT.Substring(58, Math.Min(15, segT.Length - 58)).Trim();
+            }
+            if (string.IsNullOrEmpty(numDoc) && segT.Length >= 88)
+            {
+                numDoc = segT.Substring(73, Math.Min(15, segT.Length - 73)).Trim();
+            }
+
+            decimal vlrNominal = 0m;
+            if (segT.Length >= 96)
+            {
+                vlrNominal = ParseMoneyCents(segT.Substring(81, 15));
+            }
+
+            // Segmento U: Valores Efetivos e Data
+            decimal juros = 0m;
+            decimal desconto = 0m;
+            decimal vlrPago = vlrNominal;
+            string dtPgto = "";
+
+            if (segU != null)
+            {
+                if (segU.Length >= 32) juros = ParseMoneyCents(segU.Substring(17, 15));
+                if (segU.Length >= 47) desconto = ParseMoneyCents(segU.Substring(32, 15));
+                if (segU.Length >= 92)
+                {
+                    decimal vp = ParseMoneyCents(segU.Substring(77, 15));
+                    if (vp > 0) vlrPago = vp;
+                }
+
+                if (segU.Length >= 145) dtPgto = segU.Substring(137, 8).Trim();
+                if (string.IsNullOrEmpty(dtPgto) && segU.Length >= 153) dtPgto = segU.Substring(145, 8).Trim();
+            }
+
+            string dtBaixa6 = "";
+            if (dtPgto.Length == 8)
+            {
+                dtBaixa6 = dtPgto.Substring(0, 4) + dtPgto.Substring(6, 2);
+            }
+            else if (dtPgto.Length == 6)
+            {
+                dtBaixa6 = dtPgto;
+            }
+            else
+            {
+                dtBaixa6 = DateTime.Now.ToString("ddMMyy");
+            }
+
+            return BuildBaixaLine(
+                codFilial,
+                "",
+                codTipoDoc,
+                numDoc,
+                dtBaixa6,
+                vlrPago,
+                juros,
+                desconto,
+                0m,
+                codContaCaixa,
+                "",
+                idFormaPgto,
+                "BOLETO"
+            );
+        }
+
+        private static string ConvertCnab400(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            List<string> resultLines = new List<string>();
+            foreach (string l in lines)
+            {
+                if (l.Length >= 400 && l.StartsWith("1"))
+                {
+                    string numDoc = "";
+                    if (l.Length >= 126) numDoc = l.Substring(116, 10).Trim();
+                    if (string.IsNullOrEmpty(numDoc) && l.Length >= 126) numDoc = l.Substring(108, 18).Trim();
+
+                    string dtOcorr = l.Length >= 116 ? l.Substring(110, 6).Trim() : DateTime.Now.ToString("ddMMyy");
+                    decimal vlrPago = l.Length >= 165 ? ParseMoneyCents(l.Substring(152, 13)) : 0m;
+                    string cpfCnpj = l.Length >= 232 ? l.Substring(218, 14).Trim() : "";
+
+                    string lineBx = BuildBaixaLine(
+                        codFilial,
+                        cpfCnpj,
+                        codTipoDoc,
+                        numDoc,
+                        dtOcorr,
+                        vlrPago,
+                        0m,
+                        0m,
+                        0m,
+                        codContaCaixa,
+                        "",
+                        idFormaPgto,
+                        "COBRANÇA"
+                    );
+                    resultLines.Add(lineBx);
+                }
+            }
+            if (resultLines.Count == 0) return "";
+            return string.Join("\r\n", resultLines.ToArray()) + "\r\n";
+        }
+
+        public static string ConvertTableToBaixa(List<List<string>> rows, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        {
+            if (rows == null || rows.Count < 2) return "";
+
+            List<string> headers = rows[0];
+            int dateCol = -1, descCol = -1, amountCol = -1, docCol = -1, cpfCol = -1;
+
+            string[] dateAliases = new string[] { "data", "date", "dt", "lancamento", "transacao", "vencimento", "pagamento" };
+            string[] descAliases = new string[] { "historico", "descricao", "memo", "description", "detalhe", "favorecido", "nome", "cliente", "fornecedor" };
+            string[] amountAliases = new string[] { "valor", "amount", "quantia", "total", "liquido", "debito", "credito", "pago" };
+            string[] docAliases = new string[] { "documento", "doc", "identificador", "numdoc", "numero", "ndoc", "titulo", "cheque" };
+            string[] cpfAliases = new string[] { "cpf", "cnpj", "inscricao", "documento_favorecido", "codclifor", "cpf_cnpj" };
+
+            for (int i = 0; i < headers.Count; i++)
+            {
+                string norm = CsvToOfxConverter.Normalize(headers[i]);
+                if (dateCol == -1 && CsvToOfxConverter.MatchAny(norm, dateAliases)) dateCol = i;
+                else if (descCol == -1 && CsvToOfxConverter.MatchAny(norm, descAliases)) descCol = i;
+                else if (amountCol == -1 && CsvToOfxConverter.MatchAny(norm, amountAliases)) amountCol = i;
+                else if (docCol == -1 && CsvToOfxConverter.MatchAny(norm, docAliases)) docCol = i;
+                else if (cpfCol == -1 && CsvToOfxConverter.MatchAny(norm, cpfAliases)) cpfCol = i;
+            }
+
+            if (dateCol == -1) dateCol = 0;
+            if (amountCol == -1) amountCol = (headers.Count > 1 ? 1 : 0);
+
+            List<string> resultLines = new List<string>();
+
+            for (int r = 1; r < rows.Count; r++)
+            {
+                List<string> row = rows[r];
+                if (row == null || row.Count == 0) continue;
+
+                string rawDate = (dateCol < row.Count) ? row[dateCol].Trim() : "";
+                string rawDesc = (descCol >= 0 && descCol < row.Count) ? row[descCol].Trim() : "";
+                string rawAmount = (amountCol < row.Count) ? row[amountCol].Trim() : "";
+                string rawDoc = (docCol >= 0 && docCol < row.Count) ? row[docCol].Trim() : "";
+                string rawCpf = (cpfCol >= 0 && cpfCol < row.Count) ? row[cpfCol].Trim() : "";
+
+                if (string.IsNullOrEmpty(rawDate) && string.IsNullOrEmpty(rawAmount)) continue;
+
+                string dtStr = CsvToOfxConverter.ParseDate(rawDate);
+                string dtBaixa6 = "";
+                if (!string.IsNullOrEmpty(dtStr) && dtStr.Length == 8)
+                {
+                    dtBaixa6 = dtStr.Substring(6, 2) + dtStr.Substring(4, 2) + dtStr.Substring(2, 2);
+                }
+                else
+                {
+                    dtBaixa6 = DateTime.Now.ToString("ddMMyy");
+                }
+
+                decimal val = Math.Abs(CsvToOfxConverter.ParseAmount(rawAmount));
+
+                if (string.IsNullOrEmpty(rawDoc))
+                {
+                    rawDoc = r.ToString();
+                }
+
+                string lineBx = BuildBaixaLine(
+                    codFilial,
+                    rawCpf,
+                    codTipoDoc,
+                    rawDoc,
+                    dtBaixa6,
+                    val,
+                    0m,
+                    0m,
+                    0m,
+                    codContaCaixa,
+                    rawDesc,
+                    idFormaPgto,
+                    "DEPÓSITO"
+                );
+                resultLines.Add(lineBx);
+            }
+
+            if (resultLines.Count == 0) return "";
+            return string.Join("\r\n", resultLines.ToArray()) + "\r\n";
+        }
+
+        private static decimal ParseMoneyCents(string str)
+        {
+            if (string.IsNullOrEmpty(str)) return 0m;
+            long val;
+            if (long.TryParse(str.Trim(), out val))
+            {
+                return (decimal)val / 100m;
+            }
+            return 0m;
+        }
+
+        public static string FormatMoney(decimal value)
+        {
+            long intPart = (long)Math.Truncate(Math.Abs(value));
+            long decPart = (long)Math.Round((Math.Abs(value) - intPart) * 10000m);
+            return string.Format("{0:D13}.{1:D4}", intPart, decPart);
+        }
+
+        public static string BuildBaixaLine(
+            string codFilial,
+            string codCliFor,
+            string codTipoDoc,
+            string numDoc,
+            string dtBaixa6,
+            decimal vlrBaixado,
+            decimal vlrJuros,
+            decimal vlrDesconto,
+            decimal vlrMulta,
+            string codContaCaixa,
+            string favorecidoNome,
+            string idFormaPgto,
+            string formaPgtoNome)
+        {
+            string f_tipo_linha = "L";
+            string f_cod_filial = (codFilial ?? "0002").PadLeft(4, '0').Substring(0, 4);
+            string f_cod_clifor = (codCliFor ?? "").PadRight(25, ' ').Substring(0, 25);
+            string f_cod_tipo_doc = (codTipoDoc ?? "IGRA").PadRight(10, ' ').Substring(0, 10);
+            string f_num_doc = (numDoc ?? "").PadRight(40, ' ').Substring(0, 40);
+            string f_dt_baixa = (dtBaixa6 ?? "").PadRight(6, ' ').Substring(0, 6);
+            string f_vlr_bx = FormatMoney(vlrBaixado);
+            string f_vlr_jr = FormatMoney(vlrJuros);
+            string f_vlr_desc = FormatMoney(vlrDesconto);
+            string f_cod_col_cx = "0000";
+            string f_cod_cta_cx = (codContaCaixa ?? "1").PadRight(10, ' ').Substring(0, 10);
+            string f_num_cont = new string(' ', 20);
+            string f_eve_cont = new string(' ', 5);
+            string f_cod_col_clifor = "0000";
+            string f_ser_doc1 = new string(' ', 3);
+
+            StringBuilder sbOpc = new StringBuilder(144);
+            for (int i = 0; i < 8; i++) sbOpc.Append(FormatMoney(0m));
+            string f_vlr_opc = sbOpc.ToString();
+
+            string f_vlr_multa = FormatMoney(vlrMulta);
+            string f_reutil = "0000";
+            string f_num_cheque = new string(' ', 20);
+
+            CultureInfo ptBr = new CultureInfo("pt-BR");
+            string vlrStr = vlrBaixado.ToString("N2", ptBr);
+            string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
+                formaPgtoNome ?? "DEPÓSITO",
+                vlrStr,
+                numDoc
+            );
+            if (!string.IsNullOrEmpty(favorecidoNome))
+            {
+                histText += " - Favorecido: " + favorecidoNome;
+            }
+            string f_hist_baixa = histText.PadRight(255, ' ');
+            if (f_hist_baixa.Length > 255) f_hist_baixa = f_hist_baixa.Substring(0, 255);
+
+            string f_tab_opc = new string(' ', 125);
+            string f_camp_alfa1 = new string(' ', 100);
+            string f_camp_alfa2_3 = new string(' ', 40);
+            string f_dt_opc = new string(' ', 30);
+            string f_ser_doc2 = new string(' ', 8);
+            string f_id_forma_pgto = (idFormaPgto ?? "12").PadRight(7, ' ').Substring(0, 7);
+
+            return string.Concat(
+                f_tipo_linha, f_cod_filial, f_cod_clifor, f_cod_tipo_doc, f_num_doc, f_dt_baixa,
+                f_vlr_bx, f_vlr_jr, f_vlr_desc, f_cod_col_cx, f_cod_cta_cx,
+                f_num_cont, f_eve_cont, f_cod_col_clifor, f_ser_doc1,
+                f_vlr_opc, f_vlr_multa, f_reutil, f_num_cheque, f_hist_baixa,
+                f_tab_opc, f_camp_alfa1, f_camp_alfa2_3, f_dt_opc, f_ser_doc2, f_id_forma_pgto
+            );
         }
     }
 }

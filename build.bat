@@ -6,7 +6,7 @@ echo ===================================================
 set CSC="C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 
 if not exist %CSC% (
-    echo Erro: Compilador C# (csc.exe) nao encontrado em %CSC%.
+    echo Erro: Compilador C# csc.exe nao encontrado em %CSC%.
     pause
     exit /b 1
 )

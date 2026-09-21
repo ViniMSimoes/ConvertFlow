@@ -18,6 +18,11 @@ Documentos\Arquivos_Convertidos\
 
 ## ✨ Principais Funcionalidades
 
+- **📥 Importação de Baixa TOTVS RM (TXT / Retorno CNAB ➔ BAIXA)**:
+  - Transforma arquivos de retorno bancário (CNAB 240 Segments A+B / T+U, CNAB 400 ou planilhas) diretamente no arquivo posicional de Baixa (Linha `L`) do TOTVS RM.
+  - Linhas com exatamente **937 caracteres**, divididas em 42 campos posicionais rigorosamente alinhados.
+  - Configurações personalizáveis com salvamento automático: Filial (`CODFILIAL`), Tipo de Documento (`CODTIPODOC`), Conta Caixa (`CODCONTA`) e Forma de Pagamento (`IDFORMAPGTO`).
+  - Codificação padrão UTF-8 com BOM e quebras de linha `CRLF`.
 - **🏦 Conciliação Bancária TOTVS (CSV / XLSX ➔ OFX)**:
   - Gera arquivos OFX com tags estritamente fechadas (`<BANKID>`, `<BRANCHID>`, `<ACCTID>`, `<DTPOSTED>`, `<TRNAMT>`, `<FITID>`, `<CHECKNUM>`, `<MEMO>`, etc.).
   - Mapeamento direto com as tabelas do TOTVS (`FCXA` - Conta/Caixa e `FXCX` - Extrato Bancário).
@@ -34,9 +39,10 @@ Documentos\Arquivos_Convertidos\
   - Geração de PDF vetorial puro (padrão PDF 1.4) formatado em tabela com paginação.
   - Geração de TXT tabulado e perfeitamente alinhado.
 - **🔄 Conversão Bidirecional Completa**:
-  - `CSV` ➔ `OFX`, `XLSX`, `PDF`, `TXT`
+  - `TXT / RET / REM` ➔ `BAIXA`, `OFX`, `XLSX`, `CSV`
+  - `CSV` ➔ `OFX`, `BAIXA`, `XLSX`, `PDF`, `TXT`
   - `OFX` ➔ `CSV`, `XLSX`, `PDF`, `TXT`
-  - `XLSX` ➔ `OFX`, `CSV`, `PDF`, `TXT`
+  - `XLSX / XLS` ➔ `OFX`, `BAIXA`, `CSV`, `PDF`, `TXT`
 
 ---
 
