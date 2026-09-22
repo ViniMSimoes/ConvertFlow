@@ -580,16 +580,40 @@ namespace ConvertFlow
             fileNameText.Text = info.Name;
             fileMetaText.Text = string.Format("{0:0.0} KB • Formato detectado: {1}", info.Length / 1024.0, detectedExtension.ToUpper());
 
+            AutoDetectParameters(path);
+
             formatOptionsPanel.Children.Clear();
             formatRadios.Clear();
 
             List<string> options = new List<string>();
+            bool isBaixaRm = false;
             if (detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem")
             {
-                options.Add("BAIXA");
-                options.Add("OFX");
-                options.Add("XLSX");
-                options.Add("CSV");
+                try
+                {
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(path);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines)) isBaixaRm = true;
+                }
+                catch { }
+
+                if (isBaixaRm)
+                {
+                    options.Add("BAIXA");
+                    options.Add("XLSX");
+                    options.Add("CSV");
+                    options.Add("TXT");
+                    options.Add("PDF");
+                }
+                else
+                {
+                    options.Add("BAIXA");
+                    options.Add("OFX");
+                    options.Add("XLSX");
+                    options.Add("CSV");
+                }
             }
             else if (detectedExtension == "csv")
             {
@@ -662,6 +686,114 @@ namespace ConvertFlow
             resultPanel.Visibility = Visibility.Collapsed;
         }
 
+        private void AutoDetectParameters(string path)
+        {
+            try
+            {
+                if (detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem")
+                {
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(path);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines)
+                    {
+                        string t = l.TrimEnd();
+                        if (!string.IsNullOrEmpty(t)) lines.Add(t);
+                    }
+
+                    if (lines.Count > 0)
+                    {
+                        if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                        {
+                            foreach (string l in lines)
+                            {
+                                if (l.Length >= 900 && l.StartsWith("L"))
+                                {
+                                    string fil = l.Substring(1, 4).Trim();
+                                    string td = l.Substring(30, 10).Trim();
+                                    string cc = l.Substring(144, 10).Trim();
+                                    string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
+
+                                    if (!string.IsNullOrEmpty(fil)) txtFilial.Text = fil;
+                                    if (!string.IsNullOrEmpty(td)) txtTipoDoc.Text = td;
+                                    if (!string.IsNullOrEmpty(cc)) txtContaCaixa.Text = cc;
+                                    if (!string.IsNullOrEmpty(fp)) txtFormaPgto.Text = fp;
+                                    break;
+                                }
+                            }
+                            return;
+                        }
+
+                        foreach (string l in lines)
+                        {
+                            if (l.Length >= 240 && l.Length > 13 && l.Substring(7, 1) == "1")
+                            {
+                                string formaLanc = l.Substring(11, 2);
+                                if (formaLanc == "30" || formaLanc == "31")
+                                {
+                                    txtFormaPgto.Text = "3";
+                                }
+                                else if (formaLanc == "01" || formaLanc == "03" || formaLanc == "11" || formaLanc == "41" || formaLanc == "43")
+                                {
+                                    txtFormaPgto.Text = "12";
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                else if (detectedExtension == "xlsx" || detectedExtension == "xls")
+                {
+                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(path);
+                    DetectTableParameters(rows);
+                }
+                else if (detectedExtension == "csv")
+                {
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(path);
+                    char delim = CsvToOfxConverter.DetectDelimiter(rawText);
+                    var rows = CsvToOfxConverter.ParseCsv(rawText, delim);
+                    DetectTableParameters(rows);
+                }
+            }
+            catch { }
+        }
+
+        private void DetectTableParameters(List<List<string>> rows)
+        {
+            if (rows == null || rows.Count < 2) return;
+            List<string> headers = rows[0];
+            int colFil = -1, colTd = -1, colCc = -1, colFp = -1;
+
+            string[] filAliases = new string[] { "filial", "codfilial", "cod_filial" };
+            string[] tdAliases = new string[] { "tipodoc", "tipo_doc", "codtipodoc", "cod_tipo_doc", "tipo documento", "tipo de documento", "documento tipo" };
+            string[] ccAliases = new string[] { "contacaixa", "conta_caixa", "codconta", "cod_conta", "codcontacaixa", "conta caixa", "conta" };
+            string[] fpAliases = new string[] { "formapgto", "forma_pgto", "idformapgto", "id_forma_pgto", "forma pagamento", "forma de pagamento" };
+
+            for (int i = 0; i < headers.Count; i++)
+            {
+                string norm = CsvToOfxConverter.Normalize(headers[i]);
+                if (colFil == -1 && CsvToOfxConverter.MatchAny(norm, filAliases)) colFil = i;
+                else if (colTd == -1 && CsvToOfxConverter.MatchAny(norm, tdAliases)) colTd = i;
+                else if (colCc == -1 && CsvToOfxConverter.MatchAny(norm, ccAliases)) colCc = i;
+                else if (colFp == -1 && CsvToOfxConverter.MatchAny(norm, fpAliases)) colFp = i;
+            }
+
+            for (int r = 1; r < rows.Count; r++)
+            {
+                List<string> row = rows[r];
+                if (row == null || row.Count == 0) continue;
+                if (colFil >= 0 && colFil < row.Count && !string.IsNullOrEmpty(row[colFil].Trim()))
+                    txtFilial.Text = row[colFil].Trim();
+                if (colTd >= 0 && colTd < row.Count && !string.IsNullOrEmpty(row[colTd].Trim()))
+                    txtTipoDoc.Text = row[colTd].Trim();
+                if (colCc >= 0 && colCc < row.Count && !string.IsNullOrEmpty(row[colCc].Trim()))
+                    txtContaCaixa.Text = row[colCc].Trim();
+                if (colFp >= 0 && colFp < row.Count && !string.IsNullOrEmpty(row[colFp].Trim()))
+                    txtFormaPgto.Text = row[colFp].Trim();
+                break;
+            }
+        }
+
         private void ResetFileSelection()
         {
             selectedFilePath = null;
@@ -718,29 +850,86 @@ namespace ConvertFlow
                     }
                     File.WriteAllText(outputPath, baixaContent, new UTF8Encoding(true));
                 }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "OFX")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "OFX")
                 {
                     string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                     string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csvContent, banco, agencia, conta);
                     File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
                 }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "XLSX")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "XLSX")
                 {
-                    string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    char delim = CsvToOfxConverter.DetectDelimiter(csvContent);
-                    var rows = CsvToOfxConverter.ParseCsv(csvContent, delim);
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                    List<List<string>> rows;
+                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                    {
+                        rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                    }
+                    else
+                    {
+                        char delim = CsvToOfxConverter.DetectDelimiter(rawText);
+                        rows = CsvToOfxConverter.ParseCsv(rawText, delim);
+                    }
                     SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
                 }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "TXT")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "CSV")
                 {
-                    string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string txt = TableFormatter.CsvToAlignedTxt(csvContent);
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                    {
+                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                        string csvOut = SimpleXlsxReader.RowsToCsv(rows, ";");
+                        File.WriteAllText(outputPath, csvOut, new UTF8Encoding(true));
+                    }
+                    else
+                    {
+                        File.WriteAllText(outputPath, rawText, new UTF8Encoding(true));
+                    }
+                }
+                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "TXT")
+                {
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                    string txt;
+                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                    {
+                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                        string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
+                        txt = TableFormatter.CsvToAlignedTxt(csvTemp);
+                    }
+                    else
+                    {
+                        txt = TableFormatter.CsvToAlignedTxt(rawText);
+                    }
                     File.WriteAllText(outputPath, txt, Encoding.UTF8);
                 }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt") && targetFormat == "PDF")
+                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "PDF")
                 {
-                    string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    SimplePdfWriter.WriteCsvToPdf(csvContent, outputPath, baseName);
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
+                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    List<string> lines = new List<string>();
+                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                    {
+                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                        string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
+                        SimplePdfWriter.WriteCsvToPdf(csvTemp, outputPath, baseName);
+                    }
+                    else
+                    {
+                        SimplePdfWriter.WriteCsvToPdf(rawText, outputPath, baseName);
+                    }
                 }
                 else if (detectedExtension == "ofx" && targetFormat == "CSV")
                 {
@@ -1709,6 +1898,158 @@ namespace ConvertFlow
     // =========================================================================
     public static class CnabToBaixaConverter
     {
+        public static bool IsBaixaRmLayout(List<string> lines)
+        {
+            if (lines == null || lines.Count == 0) return false;
+            int rmMatches = 0;
+            int checkCount = Math.Min(lines.Count, 15);
+            for (int i = 0; i < checkCount; i++)
+            {
+                string l = lines[i];
+                if (l.Length >= 900 && l.StartsWith("L"))
+                {
+                    rmMatches++;
+                }
+            }
+            return (rmMatches > 0 && (rmMatches * 2 >= checkCount || rmMatches >= 3));
+        }
+
+        public static decimal ParseBaixaDecimal(string str)
+        {
+            if (string.IsNullOrEmpty(str)) return 0m;
+            str = str.Trim();
+            decimal res;
+            if (decimal.TryParse(str, NumberStyles.Any, CultureInfo.InvariantCulture, out res))
+            {
+                return res;
+            }
+            if (decimal.TryParse(str, NumberStyles.Any, new CultureInfo("pt-BR"), out res))
+            {
+                return res;
+            }
+            return 0m;
+        }
+
+        public static string ProcessBaixaRmFile(List<string> lines, string fallbackFilial, string fallbackTipoDoc, string fallbackContaCaixa, string fallbackFormaPgto)
+        {
+            List<string> resultLines = new List<string>();
+            foreach (string l in lines)
+            {
+                if (l.Length >= 900 && l.StartsWith("L"))
+                {
+                    string fil = l.Substring(1, 4).Trim();
+                    if (string.IsNullOrEmpty(fil)) fil = fallbackFilial;
+
+                    string clifor = l.Substring(5, 25).Trim();
+
+                    string td = l.Substring(30, 10).Trim();
+                    if (string.IsNullOrEmpty(td)) td = fallbackTipoDoc;
+
+                    string numDoc = l.Substring(40, 40).Trim();
+                    string dtBx = l.Substring(80, 6).Trim();
+
+                    string vlrBxStr = l.Substring(86, 18).Trim();
+                    string vlrJrStr = l.Substring(104, 18).Trim();
+                    string vlrDescStr = l.Substring(122, 18).Trim();
+
+                    string cc = l.Substring(144, 10).Trim();
+                    if (string.IsNullOrEmpty(cc)) cc = fallbackContaCaixa;
+
+                    string vlrMultaStr = (l.Length >= 348) ? l.Substring(330, 18).Trim() : "0";
+                    string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
+                    string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
+                    if (string.IsNullOrEmpty(fp)) fp = fallbackFormaPgto;
+
+                    decimal vlrBx = ParseBaixaDecimal(vlrBxStr);
+                    decimal vlrJr = ParseBaixaDecimal(vlrJrStr);
+                    decimal vlrDesc = ParseBaixaDecimal(vlrDescStr);
+                    decimal vlrMulta = ParseBaixaDecimal(vlrMultaStr);
+
+                    string lineBx = BuildBaixaLineDirect(
+                        fil,
+                        clifor,
+                        td,
+                        numDoc,
+                        dtBx,
+                        vlrBx,
+                        vlrJr,
+                        vlrDesc,
+                        vlrMulta,
+                        cc,
+                        hist,
+                        fp
+                    );
+                    resultLines.Add(lineBx);
+                }
+            }
+
+            if (resultLines.Count == 0) return "";
+            return string.Join("\r\n", resultLines.ToArray()) + "\r\n";
+        }
+
+        public static List<List<string>> ParseBaixaRmToRows(List<string> lines)
+        {
+            List<List<string>> rows = new List<List<string>>();
+            List<string> header = new List<string>()
+            {
+                "Filial",
+                "Cliente_Fornecedor",
+                "Tipo_Documento",
+                "Numero_Documento",
+                "Data_Baixa",
+                "Valor_Baixado",
+                "Valor_Juros",
+                "Valor_Desconto",
+                "Conta_Caixa",
+                "Historico",
+                "Forma_Pagamento"
+            };
+            rows.Add(header);
+
+            CultureInfo ptBr = new CultureInfo("pt-BR");
+            foreach (string l in lines)
+            {
+                if (l.Length >= 900 && l.StartsWith("L"))
+                {
+                    string fil = l.Substring(1, 4).Trim();
+                    string clifor = l.Substring(5, 25).Trim();
+                    string td = l.Substring(30, 10).Trim();
+                    string numDoc = l.Substring(40, 40).Trim();
+                    string dtBx = l.Substring(80, 6).Trim();
+                    string dtFormatted = dtBx;
+                    if (dtBx.Length == 6)
+                    {
+                        dtFormatted = dtBx.Substring(0, 2) + "/" + dtBx.Substring(2, 2) + "/20" + dtBx.Substring(4, 2);
+                    }
+
+                    decimal vlrBx = ParseBaixaDecimal(l.Substring(86, 18));
+                    decimal vlrJr = ParseBaixaDecimal(l.Substring(104, 18));
+                    decimal vlrDesc = ParseBaixaDecimal(l.Substring(122, 18));
+
+                    string cc = l.Substring(144, 10).Trim();
+                    string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
+                    string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
+
+                    List<string> row = new List<string>()
+                    {
+                        fil,
+                        clifor,
+                        td,
+                        numDoc,
+                        dtFormatted,
+                        vlrBx.ToString("N2", ptBr),
+                        vlrJr.ToString("N2", ptBr),
+                        vlrDesc.ToString("N2", ptBr),
+                        cc,
+                        hist,
+                        fp
+                    };
+                    rows.Add(row);
+                }
+            }
+            return rows;
+        }
+
         public static string ConvertToBaixa(string rawText, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
         {
             if (string.IsNullOrEmpty(rawText)) return "";
@@ -1722,6 +2063,12 @@ namespace ConvertFlow
             }
 
             if (lines.Count == 0) return "";
+
+            // 0. Verifica se o arquivo já é um layout de Baixa TOTVS RM (Linha L, >= 900 posições)
+            if (IsBaixaRmLayout(lines))
+            {
+                return ProcessBaixaRmFile(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+            }
 
             // 1. Tenta CNAB 240 (Segmentos A+B ou T+U)
             bool isCnab240 = false;
@@ -2021,12 +2368,18 @@ namespace ConvertFlow
 
             List<string> headers = rows[0];
             int dateCol = -1, descCol = -1, amountCol = -1, docCol = -1, cpfCol = -1;
+            int filCol = -1, tdCol = -1, ccCol = -1, fpCol = -1;
 
             string[] dateAliases = new string[] { "data", "date", "dt", "lancamento", "transacao", "vencimento", "pagamento" };
             string[] descAliases = new string[] { "historico", "descricao", "memo", "description", "detalhe", "favorecido", "nome", "cliente", "fornecedor" };
             string[] amountAliases = new string[] { "valor", "amount", "quantia", "total", "liquido", "debito", "credito", "pago" };
             string[] docAliases = new string[] { "documento", "doc", "identificador", "numdoc", "numero", "ndoc", "titulo", "cheque" };
             string[] cpfAliases = new string[] { "cpf", "cnpj", "inscricao", "documento_favorecido", "codclifor", "cpf_cnpj" };
+
+            string[] filAliases = new string[] { "filial", "codfilial", "cod_filial" };
+            string[] tdAliases = new string[] { "tipodoc", "tipo_doc", "codtipodoc", "cod_tipo_doc", "tipo documento", "tipo de documento", "documento tipo" };
+            string[] ccAliases = new string[] { "contacaixa", "conta_caixa", "codconta", "cod_conta", "codcontacaixa", "conta caixa", "conta" };
+            string[] fpAliases = new string[] { "formapgto", "forma_pgto", "idformapgto", "id_forma_pgto", "forma pagamento", "forma de pagamento" };
 
             for (int i = 0; i < headers.Count; i++)
             {
@@ -2036,6 +2389,11 @@ namespace ConvertFlow
                 else if (amountCol == -1 && CsvToOfxConverter.MatchAny(norm, amountAliases)) amountCol = i;
                 else if (docCol == -1 && CsvToOfxConverter.MatchAny(norm, docAliases)) docCol = i;
                 else if (cpfCol == -1 && CsvToOfxConverter.MatchAny(norm, cpfAliases)) cpfCol = i;
+
+                if (filCol == -1 && CsvToOfxConverter.MatchAny(norm, filAliases)) filCol = i;
+                else if (tdCol == -1 && CsvToOfxConverter.MatchAny(norm, tdAliases)) tdCol = i;
+                else if (ccCol == -1 && CsvToOfxConverter.MatchAny(norm, ccAliases)) ccCol = i;
+                else if (fpCol == -1 && CsvToOfxConverter.MatchAny(norm, fpAliases)) fpCol = i;
             }
 
             if (dateCol == -1) dateCol = 0;
@@ -2053,6 +2411,11 @@ namespace ConvertFlow
                 string rawAmount = (amountCol < row.Count) ? row[amountCol].Trim() : "";
                 string rawDoc = (docCol >= 0 && docCol < row.Count) ? row[docCol].Trim() : "";
                 string rawCpf = (cpfCol >= 0 && cpfCol < row.Count) ? row[cpfCol].Trim() : "";
+
+                string rowFil = (filCol >= 0 && filCol < row.Count && !string.IsNullOrEmpty(row[filCol].Trim())) ? row[filCol].Trim() : codFilial;
+                string rowTd = (tdCol >= 0 && tdCol < row.Count && !string.IsNullOrEmpty(row[tdCol].Trim())) ? row[tdCol].Trim() : codTipoDoc;
+                string rowCc = (ccCol >= 0 && ccCol < row.Count && !string.IsNullOrEmpty(row[ccCol].Trim())) ? row[ccCol].Trim() : codContaCaixa;
+                string rowFp = (fpCol >= 0 && fpCol < row.Count && !string.IsNullOrEmpty(row[fpCol].Trim())) ? row[fpCol].Trim() : idFormaPgto;
 
                 if (string.IsNullOrEmpty(rawDate) && string.IsNullOrEmpty(rawAmount)) continue;
 
@@ -2075,18 +2438,18 @@ namespace ConvertFlow
                 }
 
                 string lineBx = BuildBaixaLine(
-                    codFilial,
+                    rowFil,
                     rawCpf,
-                    codTipoDoc,
+                    rowTd,
                     rawDoc,
                     dtBaixa6,
                     val,
                     0m,
                     0m,
                     0m,
-                    codContaCaixa,
+                    rowCc,
                     rawDesc,
-                    idFormaPgto,
+                    rowFp,
                     "DEPÓSITO"
                 );
                 resultLines.Add(lineBx);
@@ -2114,7 +2477,7 @@ namespace ConvertFlow
             return string.Format("{0:D13}.{1:D4}", intPart, decPart);
         }
 
-        public static string BuildBaixaLine(
+        public static string BuildBaixaLineDirect(
             string codFilial,
             string codCliFor,
             string codTipoDoc,
@@ -2125,14 +2488,13 @@ namespace ConvertFlow
             decimal vlrDesconto,
             decimal vlrMulta,
             string codContaCaixa,
-            string favorecidoNome,
-            string idFormaPgto,
-            string formaPgtoNome)
+            string customHist,
+            string idFormaPgto)
         {
             string f_tipo_linha = "L";
-            string f_cod_filial = (codFilial ?? "0002").PadLeft(4, '0').Substring(0, 4);
+            string f_cod_filial = (codFilial ?? "0001").PadLeft(4, '0').Substring(0, 4);
             string f_cod_clifor = (codCliFor ?? "").PadRight(25, ' ').Substring(0, 25);
-            string f_cod_tipo_doc = (codTipoDoc ?? "IGRA").PadRight(10, ' ').Substring(0, 10);
+            string f_cod_tipo_doc = (codTipoDoc ?? "ICOP").PadRight(10, ' ').Substring(0, 10);
             string f_num_doc = (numDoc ?? "").PadRight(40, ' ').Substring(0, 40);
             string f_dt_baixa = (dtBaixa6 ?? "").PadRight(6, ' ').Substring(0, 6);
             string f_vlr_bx = FormatMoney(vlrBaixado);
@@ -2153,6 +2515,50 @@ namespace ConvertFlow
             string f_reutil = "0000";
             string f_num_cheque = new string(' ', 20);
 
+            string histText = customHist;
+            if (string.IsNullOrEmpty(histText))
+            {
+                CultureInfo ptBr = new CultureInfo("pt-BR");
+                string vlrStr = vlrBaixado.ToString("N2", ptBr);
+                histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: BANCO - Valor: R${0} - Número do Documento: {1}",
+                    vlrStr,
+                    numDoc
+                );
+            }
+            string f_hist_baixa = histText.PadRight(255, ' ');
+            if (f_hist_baixa.Length > 255) f_hist_baixa = f_hist_baixa.Substring(0, 255);
+
+            string f_tab_opc = new string(' ', 125);
+            string f_camp_alfa1 = new string(' ', 100);
+            string f_camp_alfa2_3 = new string(' ', 40);
+            string f_dt_opc = new string(' ', 30);
+            string f_ser_doc2 = new string(' ', 8);
+            string f_id_forma_pgto = (idFormaPgto ?? "3").PadRight(7, ' ').Substring(0, 7);
+
+            return string.Concat(
+                f_tipo_linha, f_cod_filial, f_cod_clifor, f_cod_tipo_doc, f_num_doc, f_dt_baixa,
+                f_vlr_bx, f_vlr_jr, f_vlr_desc, f_cod_col_cx, f_cod_cta_cx,
+                f_num_cont, f_eve_cont, f_cod_col_clifor, f_ser_doc1,
+                f_vlr_opc, f_vlr_multa, f_reutil, f_num_cheque, f_hist_baixa,
+                f_tab_opc, f_camp_alfa1, f_camp_alfa2_3, f_dt_opc, f_ser_doc2, f_id_forma_pgto
+            );
+        }
+
+        public static string BuildBaixaLine(
+            string codFilial,
+            string codCliFor,
+            string codTipoDoc,
+            string numDoc,
+            string dtBaixa6,
+            decimal vlrBaixado,
+            decimal vlrJuros,
+            decimal vlrDesconto,
+            decimal vlrMulta,
+            string codContaCaixa,
+            string favorecidoNome,
+            string idFormaPgto,
+            string formaPgtoNome)
+        {
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
             string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
@@ -2164,23 +2570,7 @@ namespace ConvertFlow
             {
                 histText += " - Favorecido: " + favorecidoNome;
             }
-            string f_hist_baixa = histText.PadRight(255, ' ');
-            if (f_hist_baixa.Length > 255) f_hist_baixa = f_hist_baixa.Substring(0, 255);
-
-            string f_tab_opc = new string(' ', 125);
-            string f_camp_alfa1 = new string(' ', 100);
-            string f_camp_alfa2_3 = new string(' ', 40);
-            string f_dt_opc = new string(' ', 30);
-            string f_ser_doc2 = new string(' ', 8);
-            string f_id_forma_pgto = (idFormaPgto ?? "12").PadRight(7, ' ').Substring(0, 7);
-
-            return string.Concat(
-                f_tipo_linha, f_cod_filial, f_cod_clifor, f_cod_tipo_doc, f_num_doc, f_dt_baixa,
-                f_vlr_bx, f_vlr_jr, f_vlr_desc, f_cod_col_cx, f_cod_cta_cx,
-                f_num_cont, f_eve_cont, f_cod_col_clifor, f_ser_doc1,
-                f_vlr_opc, f_vlr_multa, f_reutil, f_num_cheque, f_hist_baixa,
-                f_tab_opc, f_camp_alfa1, f_camp_alfa2_3, f_dt_opc, f_ser_doc2, f_id_forma_pgto
-            );
+            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto);
         }
     }
 }
