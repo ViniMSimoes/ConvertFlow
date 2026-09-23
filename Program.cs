@@ -926,7 +926,7 @@ namespace ConvertFlow
                         else if (line.StartsWith("FILIAL=")) currentFilial = line.Substring(7).Trim();
                         else if (line.StartsWith("TIPODOC=")) currentTipoDoc = line.Substring(8).Trim();
                         else if (line.StartsWith("CONTACAIXA=")) currentContaCaixa = line.Substring(11).Trim();
-                        else if (line.StartsWith("FORMAPGTO=")) currentFormaPgto = line.Substring(10).Trim();
+                        else if (line.StartsWith("FORMAPGTO=")) currentFormaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(line.Substring(10).Trim());
                         else if (line.StartsWith("DB_SERVER=")) TotvsDbService.Server = line.Substring(10).Trim();
                         else if (line.StartsWith("DB_DATABASE=")) TotvsDbService.Database = line.Substring(12).Trim();
                         else if (line.StartsWith("DB_USER=")) TotvsDbService.User = line.Substring(8).Trim();
@@ -963,7 +963,7 @@ namespace ConvertFlow
                 sb.AppendLine("FILIAL=" + (currentFilial ?? "0002"));
                 sb.AppendLine("TIPODOC=" + (currentTipoDoc ?? "ICOP"));
                 sb.AppendLine("CONTACAIXA=" + (currentContaCaixa ?? "1"));
-                sb.AppendLine("FORMAPGTO=" + (currentFormaPgto ?? "12"));
+                sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "12"));
                 sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.113"));
                 sb.AppendLine("DB_DATABASE=" + (TotvsDbService.Database ?? "CORPORERM"));
                 sb.AppendLine("DB_USER=" + (TotvsDbService.User ?? "vinicius.marcelo"));
@@ -1200,7 +1200,7 @@ namespace ConvertFlow
                                 {
                                     currentFormaPgto = "3";
                                 }
-                                else if (formaLanc == "01" || formaLanc == "03" || formaLanc == "11" || formaLanc == "41" || formaLanc == "43")
+                                else if (formaLanc == "01" || formaLanc == "03" || formaLanc == "11" || formaLanc == "41" || formaLanc == "43" || formaLanc == "45" || formaLanc == "47")
                                 {
                                     currentFormaPgto = "12";
                                 }
@@ -1256,7 +1256,7 @@ namespace ConvertFlow
                 if (colCc >= 0 && colCc < row.Count && !string.IsNullOrEmpty(row[colCc].Trim()))
                     currentContaCaixa = row[colCc].Trim();
                 if (colFp >= 0 && colFp < row.Count && !string.IsNullOrEmpty(row[colFp].Trim()))
-                    currentFormaPgto = row[colFp].Trim();
+                    currentFormaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(row[colFp].Trim());
                 break;
             }
         }
@@ -1286,7 +1286,7 @@ namespace ConvertFlow
                 string filial = string.IsNullOrEmpty(currentFilial) ? "0002" : currentFilial;
                 string tipoDoc = string.IsNullOrEmpty(currentTipoDoc) ? "ICOP" : currentTipoDoc;
                 string contaCaixa = string.IsNullOrEmpty(currentContaCaixa) ? "1" : currentContaCaixa;
-                string formaPgto = string.IsNullOrEmpty(currentFormaPgto) ? "12" : currentFormaPgto;
+                string formaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto);
 
                 string baseName = Path.GetFileNameWithoutExtension(selectedFilePath);
                 string timeTag = DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -2397,6 +2397,88 @@ namespace ConvertFlow
             return 0m;
         }
 
+        public static string NormalizeIdFormaPgto(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "12";
+            raw = raw.Trim();
+            if (raw.Length == 0) return "12";
+
+            System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(raw, @"^\s*(\d+)");
+            if (m.Success)
+            {
+                return m.Groups[1].Value;
+            }
+
+            string upper = raw.ToUpperInvariant();
+
+            // Depósito / TED / DOC / PIX -> 12
+            if (upper.Contains("PIX") ||
+                upper.Contains("DEP") ||
+                upper.Contains("TRANSF") ||
+                upper.Contains("TED") ||
+                upper.Contains("DOC") ||
+                upper == "DE")
+            {
+                return "12";
+            }
+
+            // Boleto / Cobrança / Banco -> 3
+            if (upper.Contains("BOL") ||
+                upper.Contains("BANC") ||
+                upper.Contains("COB") ||
+                upper.Contains("TIT") ||
+                upper == "BA")
+            {
+                return "3";
+            }
+
+            // Dinheiro / Espécie / Caixa -> 1
+            if (upper.Contains("DIN") ||
+                upper.Contains("ESP") ||
+                upper.Contains("CAIX") ||
+                upper == "DI")
+            {
+                return "1";
+            }
+
+            // Cheque -> 6
+            if (upper.Contains("CHEQ") || upper == "CH")
+            {
+                return "6";
+            }
+
+            // Cartão de Crédito -> 9
+            if (upper.Contains("CRED") || upper == "VC" || upper == "RC")
+            {
+                return "9";
+            }
+
+            // Cartão de Débito -> 13
+            if (upper.Contains("DEB") || upper == "VD" || upper == "RD")
+            {
+                return "13";
+            }
+
+            return "12";
+        }
+
+        public static string GetFormaPgtoNome(string idOrName)
+        {
+            string id = NormalizeIdFormaPgto(idOrName);
+            switch (id)
+            {
+                case "12": return "DEPÓSITO";
+                case "3": return "BANCO";
+                case "1": return "DINHEIRO";
+                case "6": return "CHEQUE";
+                case "9":
+                case "14": return "CARTÃO CRÉDITO";
+                case "13":
+                case "2": return "CARTÃO DÉBITO";
+                default: return "DEPÓSITO";
+            }
+        }
+
         public static string ProcessBaixaRmFile(List<string> lines, string fallbackFilial, string fallbackTipoDoc, string fallbackContaCaixa, string fallbackFormaPgto)
         {
             List<string> resultLines = new List<string>();
@@ -2442,6 +2524,7 @@ namespace ConvertFlow
                         if (string.IsNullOrEmpty(cc)) cc = fallbackContaCaixa;
                     }
                     if (string.IsNullOrEmpty(fp)) fp = fallbackFormaPgto;
+                    fp = NormalizeIdFormaPgto(fp);
 
                     string lineBx = BuildBaixaLineDirect(
                         fil,
@@ -2509,6 +2592,7 @@ namespace ConvertFlow
                     string cc = l.Substring(144, 10).Trim();
                     string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
                     string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
+                    fp = NormalizeIdFormaPgto(fp);
                     string idLan = (l.Length >= 852) ? l.Substring(752, 100).Trim() : "";
                     if (string.IsNullOrEmpty(idLan) && hist.Contains("IDLAN:"))
                     {
@@ -2734,6 +2818,12 @@ namespace ConvertFlow
             string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
             string idLan = flan.Found ? flan.IdLan : "";
 
+            string numFp = NormalizeIdFormaPgto(idFormaPgto);
+            if (segA.Length >= 20 && segA.Substring(17, 3) == "009")
+            {
+                numFp = "12";
+            }
+
             return BuildBaixaLine(
                 finalFilial,
                 finalCliFor,
@@ -2746,7 +2836,7 @@ namespace ConvertFlow
                 multa,
                 finalContaCaixa,
                 favorecido,
-                idFormaPgto,
+                numFp,
                 "DEPÓSITO",
                 idLan
             );
@@ -2814,6 +2904,12 @@ namespace ConvertFlow
             string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
             string idLan = flan.Found ? flan.IdLan : "";
 
+            string numFp = NormalizeIdFormaPgto(idFormaPgto);
+            if (string.IsNullOrEmpty(numFp) || numFp == "12")
+            {
+                numFp = "3";
+            }
+
             return BuildBaixaLine(
                 finalFilial,
                 finalCliFor,
@@ -2826,7 +2922,7 @@ namespace ConvertFlow
                 0m,
                 finalContaCaixa,
                 "",
-                idFormaPgto,
+                numFp,
                 "BOLETO",
                 idLan
             );
@@ -2855,6 +2951,12 @@ namespace ConvertFlow
                     string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
                     string idLan = flan.Found ? flan.IdLan : "";
 
+                    string numFp = NormalizeIdFormaPgto(idFormaPgto);
+                    if (string.IsNullOrEmpty(numFp) || numFp == "12")
+                    {
+                        numFp = "3";
+                    }
+
                     string lineBx = BuildBaixaLine(
                         finalFilial,
                         finalCliFor,
@@ -2867,7 +2969,7 @@ namespace ConvertFlow
                         0m,
                         finalContaCaixa,
                         "",
-                        idFormaPgto,
+                        numFp,
                         "COBRANÇA",
                         idLan
                     );
@@ -2935,6 +3037,7 @@ namespace ConvertFlow
                 string rowTd = (tdCol >= 0 && tdCol < row.Count && !string.IsNullOrEmpty(row[tdCol].Trim())) ? row[tdCol].Trim() : null;
                 string rowCc = (ccCol >= 0 && ccCol < row.Count && !string.IsNullOrEmpty(row[ccCol].Trim())) ? row[ccCol].Trim() : codContaCaixa;
                 string rowFp = (fpCol >= 0 && fpCol < row.Count && !string.IsNullOrEmpty(row[fpCol].Trim())) ? row[fpCol].Trim() : idFormaPgto;
+                rowFp = NormalizeIdFormaPgto(rowFp);
 
                 if (string.IsNullOrEmpty(rawDate) && string.IsNullOrEmpty(rawAmount)) continue;
 
@@ -2981,7 +3084,7 @@ namespace ConvertFlow
                     rowCc,
                     rawDesc,
                     rowFp,
-                    "DEPÓSITO",
+                    GetFormaPgtoNome(rowFp),
                     rawIdLan
                 );
                 resultLines.Add(lineBx);
@@ -3053,7 +3156,8 @@ namespace ConvertFlow
             {
                 CultureInfo ptBr = new CultureInfo("pt-BR");
                 string vlrStr = vlrBaixado.ToString("N2", ptBr);
-                histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: BANCO - Valor: R${0} - Número do Documento: {1}",
+                histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
+                    GetFormaPgtoNome(idFormaPgto),
                     vlrStr,
                     numDoc
                 );
@@ -3070,7 +3174,8 @@ namespace ConvertFlow
             string f_camp_alfa2_3 = new string(' ', 40);
             string f_dt_opc = new string(' ', 30);
             string f_ser_doc2 = new string(' ', 8);
-            string f_id_forma_pgto = (idFormaPgto ?? "3").PadRight(7, ' ').Substring(0, 7);
+            string numFp = NormalizeIdFormaPgto(idFormaPgto);
+            string f_id_forma_pgto = numFp.PadRight(7, ' ').Substring(0, 7);
 
             return string.Concat(
                 f_tipo_linha, f_cod_filial, f_cod_clifor, f_cod_tipo_doc, f_num_doc, f_dt_baixa,
@@ -3116,8 +3221,9 @@ namespace ConvertFlow
         {
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
+            string nomeFp = !string.IsNullOrEmpty(formaPgtoNome) ? formaPgtoNome : GetFormaPgtoNome(idFormaPgto);
             string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
-                formaPgtoNome ?? "DEPÓSITO",
+                nomeFp,
                 vlrStr,
                 numDoc
             );
