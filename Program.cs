@@ -11,6 +11,8 @@ using System.Windows.Input;
 using System.Security.Cryptography;
 using System.Xml;
 using System.Globalization;
+using System.Data;
+using System.Data.SqlClient;
 using Microsoft.Win32;
 
 namespace ConvertFlow
@@ -23,6 +25,413 @@ namespace ConvertFlow
             App app = new App();
             MainWindow window = new MainWindow();
             app.Run(window);
+        }
+    }
+
+    public class FlanResult
+    {
+        public string IdLan;
+        public string CodTipoDoc;
+        public string CodFilial;
+        public string CodCfo;
+        public string CodConta;
+        public decimal ValorOriginal;
+        public string NumeroDocumento;
+        public bool Found;
+    }
+
+    public static class TotvsDbService
+    {
+        public static string Server = "172.20.11.113";
+        public static string Database = "CORPORERM";
+        public static string User = "vinicius.marcelo";
+        public static string Password = "";
+        public static bool UseWindowsAuth = false;
+        public static bool IsEnabled = true;
+
+        private static Dictionary<string, FlanResult> cache = new Dictionary<string, FlanResult>(StringComparer.OrdinalIgnoreCase);
+
+        public static void ClearCache()
+        {
+            lock (cache)
+            {
+                cache.Clear();
+            }
+        }
+
+        public static string GetConnectionString()
+        {
+            SqlConnectionStringBuilder builder = new SqlConnectionStringBuilder();
+            builder.DataSource = Server;
+            builder.InitialCatalog = Database;
+            builder.ConnectTimeout = 4;
+            if (UseWindowsAuth)
+            {
+                builder.IntegratedSecurity = true;
+            }
+            else
+            {
+                builder.IntegratedSecurity = false;
+                builder.UserID = User;
+                builder.Password = Password;
+            }
+            return builder.ConnectionString;
+        }
+
+        public static string TestConnection()
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
+                    using (SqlCommand cmd = new SqlCommand("SELECT TOP 1 IDLAN FROM DBO.FLAN WITH (NOLOCK)", conn))
+                    {
+                        cmd.CommandTimeout = 4;
+                        cmd.ExecuteScalar();
+                    }
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+        }
+
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
+        {
+            FlanResult res = new FlanResult();
+            res.Found = false;
+
+            if (!IsEnabled) return res;
+
+            string cleanDoc = (docNum ?? "").Trim();
+            string cleanDocNoZeros = cleanDoc.TrimStart('0');
+            string cleanCpf = (cpfCnpj ?? "").Replace(".", "").Replace("-", "").Replace("/", "").Trim();
+
+            string cacheKey = string.Format("{0}|{1}|{2}", cleanDoc, cleanCpf, valor);
+            lock (cache)
+            {
+                if (cache.ContainsKey(cacheKey)) return cache[cacheKey];
+            }
+
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
+
+                    if (!string.IsNullOrEmpty(cleanDoc))
+                    {
+                        string sql = @"SELECT TOP 1 IDLAN, CODTIPODOC, CODFILIAL, CODCFO, CODCONTA, VALORORIGINAL, NUMERODOCUMENTO 
+                                       FROM DBO.FLAN WITH (NOLOCK) 
+                                       WHERE NUMERODOCUMENTO = @Doc 
+                                          OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                          OR IPTE = @Doc
+                                          OR NOSSONUMERO = @Doc
+                                          OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
+                                       ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                        using (SqlCommand cmd = new SqlCommand(sql, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Doc", cleanDoc);
+                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
+
+                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    res.Found = true;
+                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
+                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
+                                    res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
+                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                }
+                            }
+                        }
+
+                        if (!res.Found && cleanDocNoZeros.Length >= 4)
+                        {
+                            string sqlLike = @"SELECT TOP 1 IDLAN, CODTIPODOC, CODFILIAL, CODCFO, CODCONTA, VALORORIGINAL, NUMERODOCUMENTO 
+                                               FROM DBO.FLAN WITH (NOLOCK) 
+                                               WHERE NUMERODOCUMENTO LIKE '%' + @DocClean
+                                               ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                            using (SqlCommand cmd = new SqlCommand(sqlLike, conn))
+                            {
+                                cmd.CommandTimeout = 4;
+                                cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros);
+                                using (SqlDataReader reader = cmd.ExecuteReader())
+                                {
+                                    if (reader.Read())
+                                    {
+                                        res.Found = true;
+                                        res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                        res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
+                                        res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                        res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
+                                        res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
+                                        res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                        if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!res.Found && !string.IsNullOrEmpty(cleanCpf) && valor > 0m)
+                    {
+                        string sqlCpf = @"SELECT TOP 1 F.IDLAN, F.CODTIPODOC, F.CODFILIAL, F.CODCFO, F.CODCONTA, F.VALORORIGINAL, F.NUMERODOCUMENTO 
+                                          FROM DBO.FLAN F WITH (NOLOCK)
+                                          INNER JOIN DBO.FCFO C WITH (NOLOCK) ON F.CODCOLIGADA = C.CODCOLIGADA AND F.CODCFO = C.CODCFO
+                                          WHERE REPLACE(REPLACE(REPLACE(C.CGCCFO, '.', ''), '-', ''), '/', '') = @Cpf
+                                            AND ABS(F.VALORORIGINAL - @Valor) < 0.05
+                                          ORDER BY F.STATUSLAN ASC, F.IDLAN DESC";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlCpf, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
+                            cmd.Parameters.AddWithValue("@Valor", valor);
+
+                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    res.Found = true;
+                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
+                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
+                                    res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
+                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Silently fails and falls back to default if connection is offline
+            }
+
+            lock (cache)
+            {
+                cache[cacheKey] = res;
+            }
+            return res;
+        }
+    }
+
+    public class DbConfigWindow : Window
+    {
+        private TextBox txtServer;
+        private TextBox txtDatabase;
+        private TextBox txtUser;
+        private PasswordBox txtPassword;
+        private CheckBox chkWinAuth;
+        private TextBlock txtStatus;
+        private Button btnTest;
+        private Button btnSave;
+
+        public DbConfigWindow()
+        {
+            Title = "Configurações da Conexão TOTVS RM (SQL Server)";
+            Width = 490;
+            Height = 460;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ResizeMode = ResizeMode.NoResize;
+            Background = new SolidColorBrush(Color.FromRgb(24, 24, 27));
+
+            Grid grid = new Grid();
+            grid.Margin = new Thickness(22);
+            grid.RowDefinitions.Add(new RowDefinition() { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition() { Height = new GridLength(1, GridUnitType.Star) });
+            grid.RowDefinitions.Add(new RowDefinition() { Height = GridLength.Auto });
+            grid.RowDefinitions.Add(new RowDefinition() { Height = GridLength.Auto });
+
+            // Header
+            StackPanel header = new StackPanel() { Margin = new Thickness(0, 0, 0, 16) };
+            header.Children.Add(new TextBlock()
+            {
+                Text = "⚡ Conexão ao Banco de Dados TOTVS RM",
+                FontSize = 14,
+                FontWeight = FontWeights.Bold,
+                Foreground = Brushes.White
+            });
+            header.Children.Add(new TextBlock()
+            {
+                Text = "Consulta automática do Tipo de Documento (CODTIPODOC) e IDLAN na tabela FLAN.",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
+                Margin = new Thickness(0, 4, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            });
+            Grid.SetRow(header, 0);
+            grid.Children.Add(header);
+
+            // Form
+            StackPanel form = new StackPanel();
+
+            form.Children.Add(new TextBlock() { Text = "Servidor / Host SQL Server:", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) });
+            txtServer = new TextBox() { Text = TotvsDbService.Server, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            form.Children.Add(txtServer);
+
+            form.Children.Add(new TextBlock() { Text = "Banco de Dados (Database):", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) });
+            txtDatabase = new TextBox() { Text = TotvsDbService.Database, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            form.Children.Add(txtDatabase);
+
+            chkWinAuth = new CheckBox()
+            {
+                Content = "Usar Autenticação do Windows (Integrated Security)",
+                IsChecked = TotvsDbService.UseWindowsAuth,
+                Foreground = Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 8)
+            };
+            form.Children.Add(chkWinAuth);
+
+            TextBlock lblUser = new TextBlock() { Text = "Usuário SQL Server:", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) };
+            txtUser = new TextBox() { Text = TotvsDbService.User, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            form.Children.Add(lblUser);
+            form.Children.Add(txtUser);
+
+            TextBlock lblPass = new TextBlock() { Text = "Senha:", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) };
+            txtPassword = new PasswordBox() { Password = TotvsDbService.Password, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            form.Children.Add(lblPass);
+            form.Children.Add(txtPassword);
+
+            chkWinAuth.Checked += (s, e) => { txtUser.IsEnabled = false; txtPassword.IsEnabled = false; };
+            chkWinAuth.Unchecked += (s, e) => { txtUser.IsEnabled = true; txtPassword.IsEnabled = true; };
+            if (chkWinAuth.IsChecked == true) { txtUser.IsEnabled = false; txtPassword.IsEnabled = false; }
+
+            Grid.SetRow(form, 1);
+            grid.Children.Add(form);
+
+            // Status Text
+            txtStatus = new TextBlock()
+            {
+                Text = "",
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 10)
+            };
+            Grid.SetRow(txtStatus, 2);
+            grid.Children.Add(txtStatus);
+
+            // Buttons
+            Grid btnGrid = new Grid();
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = GridLength.Auto });
+            btnGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = GridLength.Auto });
+
+            btnTest = new Button()
+            {
+                Content = "🔌 Testar Conexão",
+                Background = new SolidColorBrush(Color.FromRgb(39, 39, 42)),
+                Foreground = Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(12, 7, 12, 7),
+                FontSize = 11,
+                Cursor = Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            btnTest.Click += BtnTest_Click;
+            Grid.SetColumn(btnTest, 0);
+            btnGrid.Children.Add(btnTest);
+
+            Button btnCancel = new Button()
+            {
+                Content = "Cancelar",
+                Background = Brushes.Transparent,
+                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(12, 7, 12, 7),
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 8, 0),
+                Cursor = Cursors.Hand
+            };
+            btnCancel.Click += (s, e) => { DialogResult = false; Close(); };
+            Grid.SetColumn(btnCancel, 1);
+            btnGrid.Children.Add(btnCancel);
+
+            btnSave = new Button()
+            {
+                Content = "Salvar",
+                Background = new SolidColorBrush(Color.FromRgb(16, 185, 129)),
+                Foreground = new SolidColorBrush(Color.FromRgb(9, 9, 11)),
+                FontWeight = FontWeights.Bold,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(16, 7, 16, 7),
+                FontSize = 11,
+                Cursor = Cursors.Hand
+            };
+            btnSave.Click += BtnSave_Click;
+            Grid.SetColumn(btnSave, 2);
+            btnGrid.Children.Add(btnSave);
+
+            Grid.SetRow(btnGrid, 3);
+            grid.Children.Add(btnGrid);
+
+            Content = grid;
+        }
+
+        private void BtnTest_Click(object sender, RoutedEventArgs e)
+        {
+            btnTest.IsEnabled = false;
+            txtStatus.Text = "Conectando ao SQL Server " + txtServer.Text.Trim() + "...";
+            txtStatus.Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216));
+
+            string prevServer = TotvsDbService.Server;
+            string prevDb = TotvsDbService.Database;
+            string prevUser = TotvsDbService.User;
+            string prevPass = TotvsDbService.Password;
+            bool prevWin = TotvsDbService.UseWindowsAuth;
+
+            TotvsDbService.Server = txtServer.Text.Trim();
+            TotvsDbService.Database = txtDatabase.Text.Trim();
+            TotvsDbService.User = txtUser.Text.Trim();
+            TotvsDbService.Password = txtPassword.Password;
+            TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+
+            string err = TotvsDbService.TestConnection();
+
+            if (err == null)
+            {
+                txtStatus.Text = "✅ Conexão estabelecida com sucesso! Tabela FLAN acessível.";
+                txtStatus.Foreground = new SolidColorBrush(Color.FromRgb(52, 211, 153));
+            }
+            else
+            {
+                txtStatus.Text = "❌ Falha na conexão: " + err;
+                txtStatus.Foreground = new SolidColorBrush(Color.FromRgb(248, 113, 113));
+                TotvsDbService.Server = prevServer;
+                TotvsDbService.Database = prevDb;
+                TotvsDbService.User = prevUser;
+                TotvsDbService.Password = prevPass;
+                TotvsDbService.UseWindowsAuth = prevWin;
+            }
+            btnTest.IsEnabled = true;
+        }
+
+        private void BtnSave_Click(object sender, RoutedEventArgs e)
+        {
+            TotvsDbService.Server = txtServer.Text.Trim();
+            TotvsDbService.Database = txtDatabase.Text.Trim();
+            TotvsDbService.User = txtUser.Text.Trim();
+            TotvsDbService.Password = txtPassword.Password;
+            TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+            TotvsDbService.ClearCache();
+            DialogResult = true;
+            Close();
         }
     }
 
@@ -45,10 +454,11 @@ namespace ConvertFlow
         private TextBox txtAgencia;
         private TextBox txtConta;
         private Border baixaConfigBorder;
-        private TextBox txtFilial;
-        private TextBox txtTipoDoc;
-        private TextBox txtContaCaixa;
-        private TextBox txtFormaPgto;
+        private TextBlock dbStatusText;
+        private string currentFilial = "0002";
+        private string currentTipoDoc = "ICOP";
+        private string currentContaCaixa = "1";
+        private string currentFormaPgto = "12";
         private Button convertButton;
         private Border resultPanel;
         private TextBlock resultPathText;
@@ -306,61 +716,73 @@ namespace ConvertFlow
                 BorderBrush = new SolidColorBrush(Color.FromRgb(39, 39, 42)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12, 10, 12, 10),
+                Padding = new Thickness(14, 12, 14, 12),
                 Margin = new Thickness(0, 12, 0, 0),
                 Visibility = Visibility.Collapsed
             };
 
             StackPanel baixaStack = new StackPanel();
+
+            Grid baixaHeaderGrid = new Grid();
+            baixaHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+            baixaHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = GridLength.Auto });
+
+            StackPanel titleBox = new StackPanel();
             TextBlock baixaTitle = new TextBlock()
             {
-                Text = "Parâmetros de Importação da Baixa TOTVS RM (Linha L):",
+                Text = "⚡ Consulta Automática ao Banco TOTVS RM",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(16, 185, 129))
+            };
+            TextBlock baixaSubtitle = new TextBlock()
+            {
+                Text = "Tipo de Documento (CODTIPODOC), IDLAN, Filial e Conta são preenchidos 100% automático via banco de dados e arquivo.",
+                FontSize = 10.5,
+                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
+                Margin = new Thickness(0, 3, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            };
+            titleBox.Children.Add(baixaTitle);
+            titleBox.Children.Add(baixaSubtitle);
+            Grid.SetColumn(titleBox, 0);
+            baixaHeaderGrid.Children.Add(titleBox);
+
+            Button btnDbConfig = new Button()
+            {
+                Content = "⚙️ Conexão Banco",
+                Background = new SolidColorBrush(Color.FromRgb(39, 39, 42)),
+                Foreground = Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(10, 5, 10, 5),
                 FontSize = 11,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
-                Margin = new Thickness(0, 0, 0, 6)
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center
             };
-            baixaStack.Children.Add(baixaTitle);
+            btnDbConfig.Click += (s, e) =>
+            {
+                DbConfigWindow dlg = new DbConfigWindow();
+                dlg.Owner = this;
+                if (dlg.ShowDialog() == true)
+                {
+                    SaveTotvsConfig();
+                    UpdateDbStatusLabel();
+                }
+            };
+            Grid.SetColumn(btnDbConfig, 1);
+            baixaHeaderGrid.Children.Add(btnDbConfig);
+            baixaStack.Children.Add(baixaHeaderGrid);
 
-            Grid baixaGrid = new Grid();
-            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
-            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
-            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1.2, GridUnitType.Star) });
-            baixaGrid.ColumnDefinitions.Add(new ColumnDefinition() { Width = new GridLength(1, GridUnitType.Star) });
+            dbStatusText = new TextBlock()
+            {
+                FontSize = 10.5,
+                Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)),
+                Margin = new Thickness(0, 8, 0, 0)
+            };
+            baixaStack.Children.Add(dbStatusText);
 
-            // Campo Filial
-            StackPanel filCol = new StackPanel() { Margin = new Thickness(0, 0, 5, 0) };
-            filCol.Children.Add(new TextBlock() { Text = "Filial (CODFILIAL)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
-            txtFilial = new TextBox() { Text = "0002", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
-            filCol.Children.Add(txtFilial);
-            Grid.SetColumn(filCol, 0);
-            baixaGrid.Children.Add(filCol);
-
-            // Campo Tipo Doc
-            StackPanel tdCol = new StackPanel() { Margin = new Thickness(5, 0, 5, 0) };
-            tdCol.Children.Add(new TextBlock() { Text = "Tipo Doc (CODTIPODOC)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
-            txtTipoDoc = new TextBox() { Text = "IGRA", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
-            tdCol.Children.Add(txtTipoDoc);
-            Grid.SetColumn(tdCol, 1);
-            baixaGrid.Children.Add(tdCol);
-
-            // Campo Conta Caixa
-            StackPanel ccCol = new StackPanel() { Margin = new Thickness(5, 0, 5, 0) };
-            ccCol.Children.Add(new TextBlock() { Text = "Conta Caixa (CODCONTA)", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
-            txtContaCaixa = new TextBox() { Text = "1", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
-            ccCol.Children.Add(txtContaCaixa);
-            Grid.SetColumn(ccCol, 2);
-            baixaGrid.Children.Add(ccCol);
-
-            // Campo Forma Pgto
-            StackPanel fpCol = new StackPanel() { Margin = new Thickness(5, 0, 0, 0) };
-            fpCol.Children.Add(new TextBlock() { Text = "Forma Pgto", FontSize = 10, Foreground = new SolidColorBrush(Color.FromRgb(113, 113, 122)), Margin = new Thickness(0, 0, 0, 2) });
-            txtFormaPgto = new TextBox() { Text = "12", Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(6, 4, 6, 4), FontSize = 11 };
-            fpCol.Children.Add(txtFormaPgto);
-            Grid.SetColumn(fpCol, 3);
-            baixaGrid.Children.Add(fpCol);
-
-            baixaStack.Children.Add(baixaGrid);
             baixaConfigBorder.Child = baixaStack;
             fileInfoPanel.Children.Add(baixaConfigBorder);
 
@@ -501,12 +923,31 @@ namespace ConvertFlow
                         if (line.StartsWith("BANCO=")) txtBanco.Text = line.Substring(6).Trim();
                         else if (line.StartsWith("AGENCIA=")) txtAgencia.Text = line.Substring(8).Trim();
                         else if (line.StartsWith("CONTA=")) txtConta.Text = line.Substring(6).Trim();
-                        else if (line.StartsWith("FILIAL=")) txtFilial.Text = line.Substring(7).Trim();
-                        else if (line.StartsWith("TIPODOC=")) txtTipoDoc.Text = line.Substring(8).Trim();
-                        else if (line.StartsWith("CONTACAIXA=")) txtContaCaixa.Text = line.Substring(11).Trim();
-                        else if (line.StartsWith("FORMAPGTO=")) txtFormaPgto.Text = line.Substring(10).Trim();
+                        else if (line.StartsWith("FILIAL=")) currentFilial = line.Substring(7).Trim();
+                        else if (line.StartsWith("TIPODOC=")) currentTipoDoc = line.Substring(8).Trim();
+                        else if (line.StartsWith("CONTACAIXA=")) currentContaCaixa = line.Substring(11).Trim();
+                        else if (line.StartsWith("FORMAPGTO=")) currentFormaPgto = line.Substring(10).Trim();
+                        else if (line.StartsWith("DB_SERVER=")) TotvsDbService.Server = line.Substring(10).Trim();
+                        else if (line.StartsWith("DB_DATABASE=")) TotvsDbService.Database = line.Substring(12).Trim();
+                        else if (line.StartsWith("DB_USER=")) TotvsDbService.User = line.Substring(8).Trim();
+                        else if (line.StartsWith("DB_PASSWORD="))
+                        {
+                            string raw = line.Substring(12).Trim();
+                            try
+                            {
+                                byte[] bytes = Convert.FromBase64String(raw);
+                                TotvsDbService.Password = Encoding.UTF8.GetString(bytes);
+                            }
+                            catch
+                            {
+                                TotvsDbService.Password = raw;
+                            }
+                        }
+                        else if (line.StartsWith("DB_WINAUTH=")) TotvsDbService.UseWindowsAuth = (line.Substring(11).Trim() == "1");
+                        else if (line.StartsWith("DB_ENABLED=")) TotvsDbService.IsEnabled = (line.Substring(11).Trim() != "0");
                     }
                 }
+                UpdateDbStatusLabel();
             }
             catch { }
         }
@@ -515,18 +956,44 @@ namespace ConvertFlow
         {
             try
             {
-                string content = string.Format("BANCO={0}\r\nAGENCIA={1}\r\nCONTA={2}\r\nFILIAL={3}\r\nTIPODOC={4}\r\nCONTACAIXA={5}\r\nFORMAPGTO={6}\r\n",
-                    txtBanco.Text.Trim(),
-                    txtAgencia.Text.Trim(),
-                    txtConta.Text.Trim(),
-                    txtFilial.Text.Trim(),
-                    txtTipoDoc.Text.Trim(),
-                    txtContaCaixa.Text.Trim(),
-                    txtFormaPgto.Text.Trim()
-                );
-                File.WriteAllText(configPath, content);
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("BANCO=" + txtBanco.Text.Trim());
+                sb.AppendLine("AGENCIA=" + txtAgencia.Text.Trim());
+                sb.AppendLine("CONTA=" + txtConta.Text.Trim());
+                sb.AppendLine("FILIAL=" + (currentFilial ?? "0002"));
+                sb.AppendLine("TIPODOC=" + (currentTipoDoc ?? "ICOP"));
+                sb.AppendLine("CONTACAIXA=" + (currentContaCaixa ?? "1"));
+                sb.AppendLine("FORMAPGTO=" + (currentFormaPgto ?? "12"));
+                sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.113"));
+                sb.AppendLine("DB_DATABASE=" + (TotvsDbService.Database ?? "CORPORERM"));
+                sb.AppendLine("DB_USER=" + (TotvsDbService.User ?? "vinicius.marcelo"));
+                string passB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(TotvsDbService.Password ?? ""));
+                sb.AppendLine("DB_PASSWORD=" + passB64);
+                sb.AppendLine("DB_WINAUTH=" + (TotvsDbService.UseWindowsAuth ? "1" : "0"));
+                sb.AppendLine("DB_ENABLED=" + (TotvsDbService.IsEnabled ? "1" : "0"));
+                File.WriteAllText(configPath, sb.ToString());
             }
             catch { }
+        }
+
+        private void UpdateDbStatusLabel()
+        {
+            if (dbStatusText == null) return;
+            if (!TotvsDbService.IsEnabled)
+            {
+                dbStatusText.Text = "⚪ Consulta ao banco desativada (usando dados automáticos do arquivo)";
+                dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170));
+            }
+            else if (string.IsNullOrEmpty(TotvsDbService.Password) && !TotvsDbService.UseWindowsAuth)
+            {
+                dbStatusText.Text = "⚠️ Servidor " + TotvsDbService.Server + " configurado. Clique em '⚙️ Conexão Banco' para autenticar.";
+                dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(251, 191, 36));
+            }
+            else
+            {
+                dbStatusText.Text = "🟢 Conectado ao TOTVS RM (" + TotvsDbService.Server + " / " + TotvsDbService.Database + ") - Consulta FLAN ativa";
+                dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(52, 211, 153));
+            }
         }
 
         private void DropZone_DragOver(object sender, DragEventArgs e)
@@ -714,10 +1181,10 @@ namespace ConvertFlow
                                     string cc = l.Substring(144, 10).Trim();
                                     string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
 
-                                    if (!string.IsNullOrEmpty(fil)) txtFilial.Text = fil;
-                                    if (!string.IsNullOrEmpty(td)) txtTipoDoc.Text = td;
-                                    if (!string.IsNullOrEmpty(cc)) txtContaCaixa.Text = cc;
-                                    if (!string.IsNullOrEmpty(fp)) txtFormaPgto.Text = fp;
+                                    if (!string.IsNullOrEmpty(fil)) currentFilial = fil;
+                                    if (!string.IsNullOrEmpty(td)) currentTipoDoc = td;
+                                    if (!string.IsNullOrEmpty(cc)) currentContaCaixa = cc;
+                                    if (!string.IsNullOrEmpty(fp)) currentFormaPgto = fp;
                                     break;
                                 }
                             }
@@ -731,11 +1198,11 @@ namespace ConvertFlow
                                 string formaLanc = l.Substring(11, 2);
                                 if (formaLanc == "30" || formaLanc == "31")
                                 {
-                                    txtFormaPgto.Text = "3";
+                                    currentFormaPgto = "3";
                                 }
                                 else if (formaLanc == "01" || formaLanc == "03" || formaLanc == "11" || formaLanc == "41" || formaLanc == "43")
                                 {
-                                    txtFormaPgto.Text = "12";
+                                    currentFormaPgto = "12";
                                 }
                                 break;
                             }
@@ -783,13 +1250,13 @@ namespace ConvertFlow
                 List<string> row = rows[r];
                 if (row == null || row.Count == 0) continue;
                 if (colFil >= 0 && colFil < row.Count && !string.IsNullOrEmpty(row[colFil].Trim()))
-                    txtFilial.Text = row[colFil].Trim();
+                    currentFilial = row[colFil].Trim();
                 if (colTd >= 0 && colTd < row.Count && !string.IsNullOrEmpty(row[colTd].Trim()))
-                    txtTipoDoc.Text = row[colTd].Trim();
+                    currentTipoDoc = row[colTd].Trim();
                 if (colCc >= 0 && colCc < row.Count && !string.IsNullOrEmpty(row[colCc].Trim()))
-                    txtContaCaixa.Text = row[colCc].Trim();
+                    currentContaCaixa = row[colCc].Trim();
                 if (colFp >= 0 && colFp < row.Count && !string.IsNullOrEmpty(row[colFp].Trim()))
-                    txtFormaPgto.Text = row[colFp].Trim();
+                    currentFormaPgto = row[colFp].Trim();
                 break;
             }
         }
@@ -816,10 +1283,10 @@ namespace ConvertFlow
                 string banco = string.IsNullOrEmpty(txtBanco.Text.Trim()) ? "001" : txtBanco.Text.Trim();
                 string agencia = string.IsNullOrEmpty(txtAgencia.Text.Trim()) ? "0001" : txtAgencia.Text.Trim();
                 string conta = string.IsNullOrEmpty(txtConta.Text.Trim()) ? "123456" : txtConta.Text.Trim();
-                string filial = string.IsNullOrEmpty(txtFilial.Text.Trim()) ? "0002" : txtFilial.Text.Trim();
-                string tipoDoc = string.IsNullOrEmpty(txtTipoDoc.Text.Trim()) ? "IGRA" : txtTipoDoc.Text.Trim();
-                string contaCaixa = string.IsNullOrEmpty(txtContaCaixa.Text.Trim()) ? "1" : txtContaCaixa.Text.Trim();
-                string formaPgto = string.IsNullOrEmpty(txtFormaPgto.Text.Trim()) ? "12" : txtFormaPgto.Text.Trim();
+                string filial = string.IsNullOrEmpty(currentFilial) ? "0002" : currentFilial;
+                string tipoDoc = string.IsNullOrEmpty(currentTipoDoc) ? "ICOP" : currentTipoDoc;
+                string contaCaixa = string.IsNullOrEmpty(currentContaCaixa) ? "1" : currentContaCaixa;
+                string formaPgto = string.IsNullOrEmpty(currentFormaPgto) ? "12" : currentFormaPgto;
 
                 string baseName = Path.GetFileNameWithoutExtension(selectedFilePath);
                 string timeTag = DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -1938,13 +2405,8 @@ namespace ConvertFlow
                 if (l.Length >= 900 && l.StartsWith("L"))
                 {
                     string fil = l.Substring(1, 4).Trim();
-                    if (string.IsNullOrEmpty(fil)) fil = fallbackFilial;
-
                     string clifor = l.Substring(5, 25).Trim();
-
                     string td = l.Substring(30, 10).Trim();
-                    if (string.IsNullOrEmpty(td)) td = fallbackTipoDoc;
-
                     string numDoc = l.Substring(40, 40).Trim();
                     string dtBx = l.Substring(80, 6).Trim();
 
@@ -1953,17 +2415,33 @@ namespace ConvertFlow
                     string vlrDescStr = l.Substring(122, 18).Trim();
 
                     string cc = l.Substring(144, 10).Trim();
-                    if (string.IsNullOrEmpty(cc)) cc = fallbackContaCaixa;
-
                     string vlrMultaStr = (l.Length >= 348) ? l.Substring(330, 18).Trim() : "0";
                     string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
                     string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
-                    if (string.IsNullOrEmpty(fp)) fp = fallbackFormaPgto;
+                    string existingIdLan = (l.Length >= 852) ? l.Substring(752, 100).Trim() : "";
 
                     decimal vlrBx = ParseBaixaDecimal(vlrBxStr);
                     decimal vlrJr = ParseBaixaDecimal(vlrJrStr);
                     decimal vlrDesc = ParseBaixaDecimal(vlrDescStr);
                     decimal vlrMulta = ParseBaixaDecimal(vlrMultaStr);
+
+                    // Consulta automática ao banco TOTVS RM na tabela FLAN
+                    var flan = TotvsDbService.QueryLancamento(numDoc, clifor, vlrBx);
+                    if (flan.Found)
+                    {
+                        if (!string.IsNullOrEmpty(flan.CodTipoDoc)) td = flan.CodTipoDoc;
+                        if (!string.IsNullOrEmpty(flan.IdLan)) existingIdLan = flan.IdLan;
+                        if (!string.IsNullOrEmpty(flan.CodFilial)) fil = flan.CodFilial;
+                        if (!string.IsNullOrEmpty(flan.CodConta)) cc = flan.CodConta;
+                        if (!string.IsNullOrEmpty(flan.CodCfo)) clifor = flan.CodCfo;
+                    }
+                    else
+                    {
+                        if (string.IsNullOrEmpty(td) || td == "IGRA") td = fallbackTipoDoc;
+                        if (string.IsNullOrEmpty(fil)) fil = fallbackFilial;
+                        if (string.IsNullOrEmpty(cc)) cc = fallbackContaCaixa;
+                    }
+                    if (string.IsNullOrEmpty(fp)) fp = fallbackFormaPgto;
 
                     string lineBx = BuildBaixaLineDirect(
                         fil,
@@ -1977,7 +2455,8 @@ namespace ConvertFlow
                         vlrMulta,
                         cc,
                         hist,
-                        fp
+                        fp,
+                        existingIdLan
                     );
                     resultLines.Add(lineBx);
                 }
@@ -1992,6 +2471,7 @@ namespace ConvertFlow
             List<List<string>> rows = new List<List<string>>();
             List<string> header = new List<string>()
             {
+                "IDLAN",
                 "Filial",
                 "Cliente_Fornecedor",
                 "Tipo_Documento",
@@ -2029,9 +2509,16 @@ namespace ConvertFlow
                     string cc = l.Substring(144, 10).Trim();
                     string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
                     string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
+                    string idLan = (l.Length >= 852) ? l.Substring(752, 100).Trim() : "";
+                    if (string.IsNullOrEmpty(idLan) && hist.Contains("IDLAN:"))
+                    {
+                        int idx = hist.IndexOf("IDLAN:");
+                        idLan = hist.Substring(idx + 6).Trim();
+                    }
 
                     List<string> row = new List<string>()
                     {
+                        idLan,
                         fil,
                         clifor,
                         td,
@@ -2238,20 +2725,30 @@ namespace ConvertFlow
                 }
             }
 
+            // Realiza consulta automática ao banco TOTVS RM na tabela FLAN
+            var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, vlrReal);
+
+            string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
+            string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
+            string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : (!string.IsNullOrEmpty(cpfCnpj) ? cpfCnpj : favorecido);
+            string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
+            string idLan = flan.Found ? flan.IdLan : "";
+
             return BuildBaixaLine(
-                codFilial,
-                cpfCnpj,
-                codTipoDoc,
+                finalFilial,
+                finalCliFor,
+                finalTipoDoc,
                 numDoc,
                 dtBaixa6,
                 vlrReal,
                 juros,
                 desconto,
                 multa,
-                codContaCaixa,
+                finalContaCaixa,
                 favorecido,
                 idFormaPgto,
-                "DEPÓSITO"
+                "DEPÓSITO",
+                idLan
             );
         }
 
@@ -2308,20 +2805,30 @@ namespace ConvertFlow
                 dtBaixa6 = DateTime.Now.ToString("ddMMyy");
             }
 
+            // Consulta automática ao banco TOTVS RM na tabela FLAN
+            var flan = TotvsDbService.QueryLancamento(numDoc, "", vlrPago);
+
+            string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
+            string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
+            string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : "";
+            string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
+            string idLan = flan.Found ? flan.IdLan : "";
+
             return BuildBaixaLine(
-                codFilial,
-                "",
-                codTipoDoc,
+                finalFilial,
+                finalCliFor,
+                finalTipoDoc,
                 numDoc,
                 dtBaixa6,
                 vlrPago,
                 juros,
                 desconto,
                 0m,
-                codContaCaixa,
+                finalContaCaixa,
                 "",
                 idFormaPgto,
-                "BOLETO"
+                "BOLETO",
+                idLan
             );
         }
 
@@ -2340,20 +2847,29 @@ namespace ConvertFlow
                     decimal vlrPago = l.Length >= 165 ? ParseMoneyCents(l.Substring(152, 13)) : 0m;
                     string cpfCnpj = l.Length >= 232 ? l.Substring(218, 14).Trim() : "";
 
+                    var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, vlrPago);
+
+                    string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
+                    string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
+                    string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : cpfCnpj;
+                    string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
+                    string idLan = flan.Found ? flan.IdLan : "";
+
                     string lineBx = BuildBaixaLine(
-                        codFilial,
-                        cpfCnpj,
-                        codTipoDoc,
+                        finalFilial,
+                        finalCliFor,
+                        finalTipoDoc,
                         numDoc,
                         dtOcorr,
                         vlrPago,
                         0m,
                         0m,
                         0m,
-                        codContaCaixa,
+                        finalContaCaixa,
                         "",
                         idFormaPgto,
-                        "COBRANÇA"
+                        "COBRANÇA",
+                        idLan
                     );
                     resultLines.Add(lineBx);
                 }
@@ -2368,7 +2884,7 @@ namespace ConvertFlow
 
             List<string> headers = rows[0];
             int dateCol = -1, descCol = -1, amountCol = -1, docCol = -1, cpfCol = -1;
-            int filCol = -1, tdCol = -1, ccCol = -1, fpCol = -1;
+            int filCol = -1, tdCol = -1, ccCol = -1, fpCol = -1, idLanCol = -1;
 
             string[] dateAliases = new string[] { "data", "date", "dt", "lancamento", "transacao", "vencimento", "pagamento" };
             string[] descAliases = new string[] { "historico", "descricao", "memo", "description", "detalhe", "favorecido", "nome", "cliente", "fornecedor" };
@@ -2380,6 +2896,7 @@ namespace ConvertFlow
             string[] tdAliases = new string[] { "tipodoc", "tipo_doc", "codtipodoc", "cod_tipo_doc", "tipo documento", "tipo de documento", "documento tipo" };
             string[] ccAliases = new string[] { "contacaixa", "conta_caixa", "codconta", "cod_conta", "codcontacaixa", "conta caixa", "conta" };
             string[] fpAliases = new string[] { "formapgto", "forma_pgto", "idformapgto", "id_forma_pgto", "forma pagamento", "forma de pagamento" };
+            string[] idLanAliases = new string[] { "idlan", "id_lan", "id lancamento", "idlancamento" };
 
             for (int i = 0; i < headers.Count; i++)
             {
@@ -2394,6 +2911,7 @@ namespace ConvertFlow
                 else if (tdCol == -1 && CsvToOfxConverter.MatchAny(norm, tdAliases)) tdCol = i;
                 else if (ccCol == -1 && CsvToOfxConverter.MatchAny(norm, ccAliases)) ccCol = i;
                 else if (fpCol == -1 && CsvToOfxConverter.MatchAny(norm, fpAliases)) fpCol = i;
+                else if (idLanCol == -1 && CsvToOfxConverter.MatchAny(norm, idLanAliases)) idLanCol = i;
             }
 
             if (dateCol == -1) dateCol = 0;
@@ -2411,9 +2929,10 @@ namespace ConvertFlow
                 string rawAmount = (amountCol < row.Count) ? row[amountCol].Trim() : "";
                 string rawDoc = (docCol >= 0 && docCol < row.Count) ? row[docCol].Trim() : "";
                 string rawCpf = (cpfCol >= 0 && cpfCol < row.Count) ? row[cpfCol].Trim() : "";
+                string rawIdLan = (idLanCol >= 0 && idLanCol < row.Count) ? row[idLanCol].Trim() : "";
 
                 string rowFil = (filCol >= 0 && filCol < row.Count && !string.IsNullOrEmpty(row[filCol].Trim())) ? row[filCol].Trim() : codFilial;
-                string rowTd = (tdCol >= 0 && tdCol < row.Count && !string.IsNullOrEmpty(row[tdCol].Trim())) ? row[tdCol].Trim() : codTipoDoc;
+                string rowTd = (tdCol >= 0 && tdCol < row.Count && !string.IsNullOrEmpty(row[tdCol].Trim())) ? row[tdCol].Trim() : null;
                 string rowCc = (ccCol >= 0 && ccCol < row.Count && !string.IsNullOrEmpty(row[ccCol].Trim())) ? row[ccCol].Trim() : codContaCaixa;
                 string rowFp = (fpCol >= 0 && fpCol < row.Count && !string.IsNullOrEmpty(row[fpCol].Trim())) ? row[fpCol].Trim() : idFormaPgto;
 
@@ -2437,6 +2956,18 @@ namespace ConvertFlow
                     rawDoc = r.ToString();
                 }
 
+                var flan = TotvsDbService.QueryLancamento(rawDoc, rawCpf, val);
+                if (flan.Found)
+                {
+                    if (string.IsNullOrEmpty(rowTd) && !string.IsNullOrEmpty(flan.CodTipoDoc)) rowTd = flan.CodTipoDoc;
+                    if (string.IsNullOrEmpty(rawIdLan)) rawIdLan = flan.IdLan;
+                    if (!string.IsNullOrEmpty(flan.CodFilial)) rowFil = flan.CodFilial;
+                    if (!string.IsNullOrEmpty(flan.CodConta)) rowCc = flan.CodConta;
+                    if (!string.IsNullOrEmpty(flan.CodCfo) && string.IsNullOrEmpty(rawCpf)) rawCpf = flan.CodCfo;
+                }
+
+                if (string.IsNullOrEmpty(rowTd)) rowTd = codTipoDoc;
+
                 string lineBx = BuildBaixaLine(
                     rowFil,
                     rawCpf,
@@ -2450,7 +2981,8 @@ namespace ConvertFlow
                     rowCc,
                     rawDesc,
                     rowFp,
-                    "DEPÓSITO"
+                    "DEPÓSITO",
+                    rawIdLan
                 );
                 resultLines.Add(lineBx);
             }
@@ -2489,7 +3021,8 @@ namespace ConvertFlow
             decimal vlrMulta,
             string codContaCaixa,
             string customHist,
-            string idFormaPgto)
+            string idFormaPgto,
+            string idLan)
         {
             string f_tipo_linha = "L";
             string f_cod_filial = (codFilial ?? "0001").PadLeft(4, '0').Substring(0, 4);
@@ -2525,11 +3058,15 @@ namespace ConvertFlow
                     numDoc
                 );
             }
+            if (!string.IsNullOrEmpty(idLan) && !histText.Contains("IDLAN"))
+            {
+                histText += " - IDLAN: " + idLan;
+            }
             string f_hist_baixa = histText.PadRight(255, ' ');
             if (f_hist_baixa.Length > 255) f_hist_baixa = f_hist_baixa.Substring(0, 255);
 
             string f_tab_opc = new string(' ', 125);
-            string f_camp_alfa1 = new string(' ', 100);
+            string f_camp_alfa1 = (idLan ?? "").PadRight(100, ' ').Substring(0, 100);
             string f_camp_alfa2_3 = new string(' ', 40);
             string f_dt_opc = new string(' ', 30);
             string f_ser_doc2 = new string(' ', 8);
@@ -2542,6 +3079,53 @@ namespace ConvertFlow
                 f_vlr_opc, f_vlr_multa, f_reutil, f_num_cheque, f_hist_baixa,
                 f_tab_opc, f_camp_alfa1, f_camp_alfa2_3, f_dt_opc, f_ser_doc2, f_id_forma_pgto
             );
+        }
+
+        public static string BuildBaixaLineDirect(
+            string codFilial,
+            string codCliFor,
+            string codTipoDoc,
+            string numDoc,
+            string dtBaixa6,
+            decimal vlrBaixado,
+            decimal vlrJuros,
+            decimal vlrDesconto,
+            decimal vlrMulta,
+            string codContaCaixa,
+            string customHist,
+            string idFormaPgto)
+        {
+            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, customHist, idFormaPgto, "");
+        }
+
+        public static string BuildBaixaLine(
+            string codFilial,
+            string codCliFor,
+            string codTipoDoc,
+            string numDoc,
+            string dtBaixa6,
+            decimal vlrBaixado,
+            decimal vlrJuros,
+            decimal vlrDesconto,
+            decimal vlrMulta,
+            string codContaCaixa,
+            string favorecidoNome,
+            string idFormaPgto,
+            string formaPgtoNome,
+            string idLan)
+        {
+            CultureInfo ptBr = new CultureInfo("pt-BR");
+            string vlrStr = vlrBaixado.ToString("N2", ptBr);
+            string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
+                formaPgtoNome ?? "DEPÓSITO",
+                vlrStr,
+                numDoc
+            );
+            if (!string.IsNullOrEmpty(favorecidoNome))
+            {
+                histText += " - Favorecido: " + favorecidoNome;
+            }
+            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, idLan);
         }
 
         public static string BuildBaixaLine(
@@ -2559,18 +3143,7 @@ namespace ConvertFlow
             string idFormaPgto,
             string formaPgtoNome)
         {
-            CultureInfo ptBr = new CultureInfo("pt-BR");
-            string vlrStr = vlrBaixado.ToString("N2", ptBr);
-            string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
-                formaPgtoNome ?? "DEPÓSITO",
-                vlrStr,
-                numDoc
-            );
-            if (!string.IsNullOrEmpty(favorecidoNome))
-            {
-                histText += " - Favorecido: " + favorecidoNome;
-            }
-            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto);
+            return BuildBaixaLine(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, favorecidoNome, idFormaPgto, formaPgtoNome, "");
         }
     }
 }

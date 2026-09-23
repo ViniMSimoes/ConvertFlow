@@ -21,7 +21,9 @@ Documentos\Arquivos_Convertidos\
 - **📥 Importação de Baixa TOTVS RM (TXT / Retorno CNAB ➔ BAIXA)**:
   - Transforma arquivos de retorno bancário (CNAB 240 Segments A+B / T+U, CNAB 400 ou planilhas) diretamente no arquivo posicional de Baixa (Linha `L`) do TOTVS RM.
   - Linhas com exatamente **937 caracteres**, divididas em 42 campos posicionais rigorosamente alinhados.
-  - Configurações personalizáveis com salvamento automático: Filial (`CODFILIAL`), Tipo de Documento (`CODTIPODOC`), Conta Caixa (`CODCONTA`) e Forma de Pagamento (`IDFORMAPGTO`).
+  - **Zero Preenchimento Manual**: Busca automatizada via SQL Server na base do TOTVS RM (`CORPORERM.DBO.FLAN`) pelo Tipo de Documento (`CODTIPODOC`), Identificador único (`IDLAN`), Filial (`CODFILIAL`), Código do Cliente/Fornecedor (`CODCFO`) e Conta Caixa (`CODCONTA`).
+  - Preenchimento do campo `IDLAN` em `CampAlfaOp1` (pos 753..852) e inclusão nas exportações XLSX/CSV.
+  - Diálogo de conexão ao banco integrado com teste de conectividade e persistência de credenciais.
   - Codificação padrão UTF-8 com BOM e quebras de linha `CRLF`.
 - **🏦 Conciliação Bancária TOTVS (CSV / XLSX ➔ OFX)**:
   - Gera arquivos OFX com tags estritamente fechadas (`<BANKID>`, `<BRANCHID>`, `<ACCTID>`, `<DTPOSTED>`, `<TRNAMT>`, `<FITID>`, `<CHECKNUM>`, `<MEMO>`, etc.).

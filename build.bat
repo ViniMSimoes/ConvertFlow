@@ -12,7 +12,7 @@ if not exist %CSC% (
 )
 
 echo [1/2] Compilando ConvertFlow.exe...
-%CSC% /target:winexe /reference:System.Xaml.dll /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" /reference:System.Xml.dll /out:"ConvertFlow.exe" "Program.cs"
+%CSC% /target:winexe /reference:System.Xaml.dll /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" /reference:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" /reference:System.Xml.dll /reference:System.Data.dll /out:"ConvertFlow.exe" "Program.cs"
 
 if %ERRORLEVEL% NEQ 0 (
     echo [FALHA] Erro ao compilar ConvertFlow.exe!
@@ -32,4 +32,4 @@ if %ERRORLEVEL% NEQ 0 (
 echo ===================================================
 echo [SUCESSO] Compilacao concluida com exito!
 echo ===================================================
-pause
+if "%1" neq "--nopause" pause
