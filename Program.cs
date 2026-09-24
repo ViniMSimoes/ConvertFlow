@@ -3122,6 +3122,7 @@ namespace ConvertFlow
         {
             // Segmento A: Dados do favorecido, documento, data e valor
             string numDoc = segA.Length >= 93 ? segA.Substring(73, Math.Min(20, segA.Length - 73)).Trim() : "";
+            string nossoNum = segA.Length >= 154 ? segA.Substring(134, Math.Min(20, segA.Length - 134)).Trim() : "";
             string dtPgto = segA.Length >= 162 ? segA.Substring(154, 8).Trim() : (segA.Length >= 101 ? segA.Substring(93, 8).Trim() : "");
             string dtBaixa6 = "";
             if (dtPgto.Length == 8)
@@ -3181,6 +3182,10 @@ namespace ConvertFlow
 
             // Realiza consulta automática ao banco TOTVS RM na tabela FLAN com prioridade STATUSLAN = 0
             var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, favorecido, vlrReal);
+            if (!flan.Found && !string.IsNullOrEmpty(nossoNum))
+            {
+                flan = TotvsDbService.QueryLancamento(nossoNum, "", "", vlrReal);
+            }
 
             string defaultTipoDoc = (!string.IsNullOrEmpty(codTipoDoc) && codTipoDoc != "ICOP" && codTipoDoc != "CRMD") ? codTipoDoc : "SALP";
             string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : defaultTipoDoc;
@@ -3190,6 +3195,8 @@ namespace ConvertFlow
                 : (!string.IsNullOrEmpty(bancoNome) ? bancoNome : (!string.IsNullOrEmpty(cpfCnpj) ? cpfCnpj : favorecido));
             string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : defaultCliFor;
             string finalContaCaixa = !string.IsNullOrEmpty(codContaCaixa) ? codContaCaixa : (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : "30";
+            string finalNumDoc = (flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc;
+            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : finalNumDoc;
             string idLan = flan.Found ? flan.IdLan : "";
             if (vlrReal == 0m && flan.Found && flan.ValorOriginal > 0m)
             {
@@ -3206,7 +3213,7 @@ namespace ConvertFlow
                 finalFilial,
                 finalCliFor,
                 finalTipoDoc,
-                numDoc,
+                finalNumDoc,
                 dtBaixa6,
                 vlrReal,
                 juros,
@@ -3217,7 +3224,8 @@ namespace ConvertFlow
                 numFp,
                 GetFormaPgtoNome(numFp),
                 idLan,
-                bancoNome
+                bancoNome,
+                histDoc
             );
         }
 
@@ -3285,6 +3293,8 @@ namespace ConvertFlow
                 : (!string.IsNullOrEmpty(bancoNome) ? bancoNome : "");
             string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : defaultCliFor;
             string finalContaCaixa = !string.IsNullOrEmpty(codContaCaixa) ? codContaCaixa : (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : "30";
+            string finalNumDoc = (flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc;
+            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : finalNumDoc;
             string idLan = flan.Found ? flan.IdLan : "";
 
             string numFp = NormalizeIdFormaPgto(idFormaPgto);
@@ -3297,7 +3307,7 @@ namespace ConvertFlow
                 finalFilial,
                 finalCliFor,
                 finalTipoDoc,
-                numDoc,
+                finalNumDoc,
                 dtBaixa6,
                 vlrPago,
                 juros,
@@ -3308,7 +3318,8 @@ namespace ConvertFlow
                 numFp,
                 GetFormaPgtoNome(numFp),
                 idLan,
-                bancoNome
+                bancoNome,
+                histDoc
             );
         }
 
@@ -3638,26 +3649,24 @@ namespace ConvertFlow
             string idFormaPgto,
             string formaPgtoNome,
             string idLan,
-            string bancoNome)
+            string bancoNome,
+            string histDoc = null)
         {
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
             string nomeFp = !string.IsNullOrEmpty(formaPgtoNome) ? formaPgtoNome : GetFormaPgtoNome(idFormaPgto);
+            string docForHist = !string.IsNullOrEmpty(histDoc) ? histDoc : numDoc;
             string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
                 nomeFp,
                 vlrStr,
-                numDoc
+                docForHist
             );
             string favEfetivo = !string.IsNullOrEmpty(bancoNome) ? bancoNome : favorecidoNome;
             if (!string.IsNullOrEmpty(favEfetivo))
             {
                 histText += " - Favorecido: " + favEfetivo;
             }
-            if (!string.IsNullOrEmpty(idLan) && !histText.Contains("IDLAN"))
-            {
-                histText += " - IDLAN: " + idLan;
-            }
-            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, idLan);
+            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, "");
         }
 
         public static string BuildBaixaLine(
