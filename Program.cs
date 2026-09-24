@@ -601,7 +601,7 @@ namespace ConvertFlow
             return nomeEncontrado;
         }
 
-        private static bool IsAllDigits(string s)
+        public static bool IsAllDigits(string s)
         {
             if (string.IsNullOrEmpty(s)) return false;
             for (int i = 0; i < s.Length; i++)
@@ -3564,11 +3564,12 @@ namespace ConvertFlow
 
         public static string ConvertTableToBaixa(List<List<string>> rows, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
         {
-            if (rows == null || rows.Count < 2) return "";
+            if (rows == null || rows.Count == 0) return "";
 
             List<string> headers = rows[0];
             int dateCol = -1, descCol = -1, amountCol = -1, docCol = -1, cpfCol = -1;
             int filCol = -1, tdCol = -1, ccCol = -1, fpCol = -1, idLanCol = -1;
+            int compCol = -1, nomeCol = -1, bancoCol = -1, cxaDescCol = -1;
 
             string[] dateAliases = new string[] { "data", "date", "dt", "lancamento", "transacao", "vencimento", "pagamento" };
             string[] descAliases = new string[] { "historico", "descricao", "memo", "description", "detalhe", "favorecido", "nome", "cliente", "fornecedor" };
@@ -3582,33 +3583,93 @@ namespace ConvertFlow
             string[] fpAliases = new string[] { "formapgto", "forma_pgto", "idformapgto", "id_forma_pgto", "forma pagamento", "forma de pagamento" };
             string[] idLanAliases = new string[] { "idlan", "id_lan", "id lancamento", "idlancamento" };
 
-            for (int i = 0; i < headers.Count; i++)
+            // 1. Detect if this is a TOTVS RM FLAN grid copy/export
+            bool isRmFlanGrid = false;
+            if (headers != null && headers.Count >= 15)
             {
-                string norm = CsvToOfxConverter.Normalize(headers[i]);
-                if (dateCol == -1 && CsvToOfxConverter.MatchAny(norm, dateAliases)) dateCol = i;
-                else if (descCol == -1 && CsvToOfxConverter.MatchAny(norm, descAliases)) descCol = i;
-                else if (amountCol == -1 && CsvToOfxConverter.MatchAny(norm, amountAliases)) amountCol = i;
-                else if (docCol == -1 && CsvToOfxConverter.MatchAny(norm, docAliases)) docCol = i;
-                else if (cpfCol == -1 && CsvToOfxConverter.MatchAny(norm, cpfAliases)) cpfCol = i;
-
-                if (filCol == -1 && CsvToOfxConverter.MatchAny(norm, filAliases)) filCol = i;
-                else if (tdCol == -1 && CsvToOfxConverter.MatchAny(norm, tdAliases)) tdCol = i;
-                else if (ccCol == -1 && CsvToOfxConverter.MatchAny(norm, ccAliases)) ccCol = i;
-                else if (fpCol == -1 && CsvToOfxConverter.MatchAny(norm, fpAliases)) fpCol = i;
-                else if (idLanCol == -1 && CsvToOfxConverter.MatchAny(norm, idLanAliases)) idLanCol = i;
+                string c0 = headers[0].Trim().ToLowerInvariant();
+                bool hasRmCfo = (headers.Count > 6 && (headers[6].StartsWith("L") || headers[6].StartsWith("F") || headers[6].StartsWith("C")));
+                bool hasIdLan = (headers.Count > 3 && TotvsDbService.IsAllDigits(headers[3]) && headers[3].Length >= 4);
+                if (c0.Contains("selecionado") || (hasRmCfo && hasIdLan))
+                {
+                    isRmFlanGrid = true;
+                }
             }
 
-            if (dateCol == -1) dateCol = 0;
-            if (amountCol == -1) amountCol = (headers.Count > 1 ? 1 : 0);
+            int startRow = 1;
+            if (isRmFlanGrid)
+            {
+                // In RM FLAN grid, columns have well-defined positions:
+                filCol = 1;
+                idLanCol = 3;
+                cpfCol = 6;
+                tdCol = 7;
+                docCol = 8;
+                compCol = 11;
+                dateCol = 13; // Data Baixa/Previsão (fallback to 10 Data Vencimento)
+                amountCol = 14;
+                descCol = 18;
+                ccCol = 27;
+                cxaDescCol = 28;
+                nomeCol = 86;
+                bancoCol = 132;
+
+                // Check if row 0 is a header or data
+                string c3 = (headers.Count > 3) ? headers[3].Trim() : "";
+                if (TotvsDbService.IsAllDigits(c3))
+                {
+                    startRow = 0; // Row 0 is already a data row!
+                }
+                else
+                {
+                    startRow = 1;
+                }
+            }
+            else
+            {
+                bool hasHeader = false;
+                for (int i = 0; i < headers.Count; i++)
+                {
+                    string norm = CsvToOfxConverter.Normalize(headers[i]);
+                    if (dateCol == -1 && CsvToOfxConverter.MatchAny(norm, dateAliases)) { dateCol = i; hasHeader = true; }
+                    else if (descCol == -1 && CsvToOfxConverter.MatchAny(norm, descAliases)) { descCol = i; hasHeader = true; }
+                    else if (amountCol == -1 && CsvToOfxConverter.MatchAny(norm, amountAliases)) { amountCol = i; hasHeader = true; }
+                    else if (docCol == -1 && CsvToOfxConverter.MatchAny(norm, docAliases)) { docCol = i; hasHeader = true; }
+                    else if (cpfCol == -1 && CsvToOfxConverter.MatchAny(norm, cpfAliases)) { cpfCol = i; hasHeader = true; }
+
+                    if (filCol == -1 && CsvToOfxConverter.MatchAny(norm, filAliases)) { filCol = i; hasHeader = true; }
+                    else if (tdCol == -1 && CsvToOfxConverter.MatchAny(norm, tdAliases)) { tdCol = i; hasHeader = true; }
+                    else if (ccCol == -1 && CsvToOfxConverter.MatchAny(norm, ccAliases)) { ccCol = i; hasHeader = true; }
+                    else if (fpCol == -1 && CsvToOfxConverter.MatchAny(norm, fpAliases)) { fpCol = i; hasHeader = true; }
+                    else if (idLanCol == -1 && CsvToOfxConverter.MatchAny(norm, idLanAliases)) { idLanCol = i; hasHeader = true; }
+                }
+
+                if (!hasHeader)
+                {
+                    startRow = 0;
+                    if (dateCol == -1) dateCol = 0;
+                    if (amountCol == -1) amountCol = (headers.Count > 1 ? 1 : 0);
+                }
+                else
+                {
+                    if (dateCol == -1) dateCol = 0;
+                    if (amountCol == -1) amountCol = (headers.Count > 1 ? 1 : 0);
+                    startRow = 1;
+                }
+            }
 
             List<string> resultLines = new List<string>();
 
-            for (int r = 1; r < rows.Count; r++)
+            for (int r = startRow; r < rows.Count; r++)
             {
                 List<string> row = rows[r];
                 if (row == null || row.Count == 0) continue;
 
                 string rawDate = (dateCol < row.Count) ? row[dateCol].Trim() : "";
+                if (string.IsNullOrEmpty(rawDate) && isRmFlanGrid && row.Count > 10)
+                {
+                    rawDate = row[10].Trim(); // fallback to Data Vencimento
+                }
                 string rawDesc = (descCol >= 0 && descCol < row.Count) ? row[descCol].Trim() : "";
                 string rawAmount = (amountCol < row.Count) ? row[amountCol].Trim() : "";
                 string rawDoc = (docCol >= 0 && docCol < row.Count) ? row[docCol].Trim() : "";
@@ -3620,6 +3681,11 @@ namespace ConvertFlow
                 string rowCc = (ccCol >= 0 && ccCol < row.Count && !string.IsNullOrEmpty(row[ccCol].Trim())) ? row[ccCol].Trim() : codContaCaixa;
                 string rowFp = (fpCol >= 0 && fpCol < row.Count && !string.IsNullOrEmpty(row[fpCol].Trim())) ? row[fpCol].Trim() : idFormaPgto;
                 rowFp = NormalizeIdFormaPgto(rowFp);
+
+                string rowComp = (compCol >= 0 && compCol < row.Count) ? row[compCol].Trim() : "";
+                string rowNome = (nomeCol >= 0 && nomeCol < row.Count) ? row[nomeCol].Trim() : "";
+                string rowBancoCode = (bancoCol >= 0 && bancoCol < row.Count) ? row[bancoCol].Trim() : "";
+                string rowCxaDesc = (cxaDescCol >= 0 && cxaDescCol < row.Count) ? row[cxaDescCol].Trim() : "";
 
                 if (string.IsNullOrEmpty(rawDate) && string.IsNullOrEmpty(rawAmount)) continue;
 
@@ -3657,9 +3723,51 @@ namespace ConvertFlow
 
                 if (string.IsNullOrEmpty(rowTd)) rowTd = codTipoDoc;
 
-                string nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf);
-                if (string.IsNullOrEmpty(nomeFuncTable)) nomeFuncTable = rawDesc;
-                string compTable = TotvsDbService.ResolveCompetencia(flan.Competencia, rawDoc, dtBaixa6);
+                string nomeFuncTable = rowNome;
+                if (string.IsNullOrEmpty(nomeFuncTable))
+                {
+                    nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf);
+                }
+                if (string.IsNullOrEmpty(nomeFuncTable))
+                {
+                    nomeFuncTable = rawDesc;
+                }
+
+                string compTable = rowComp;
+                if (string.IsNullOrEmpty(compTable))
+                {
+                    compTable = TotvsDbService.ResolveCompetencia(flan.Competencia, rawDoc, dtBaixa6);
+                }
+
+                string bancoNome = "";
+                if (rowBancoCode == "756" || rowCxaDesc.ToUpper().Contains("SICOOB"))
+                {
+                    bancoNome = "SICOOB";
+                }
+                else if (rowBancoCode == "001" || rowBancoCode == "1" || rowCxaDesc.ToUpper().Contains("BRASIL"))
+                {
+                    bancoNome = "BANCO DO BRASIL";
+                }
+                else if (rowBancoCode == "237" || rowCxaDesc.ToUpper().Contains("BRADESCO"))
+                {
+                    bancoNome = "BRADESCO";
+                }
+                else if (rowBancoCode == "104" || rowCxaDesc.ToUpper().Contains("CAIXA"))
+                {
+                    bancoNome = "CAIXA";
+                }
+                else if (rowBancoCode == "033" || rowBancoCode == "33" || rowCxaDesc.ToUpper().Contains("SANTANDER"))
+                {
+                    bancoNome = "SANTANDER";
+                }
+                else if (!string.IsNullOrEmpty(rowBancoCode))
+                {
+                    bancoNome = TotvsDbService.ExtractNomeBanco("", "", rowBancoCode);
+                }
+                if (string.IsNullOrEmpty(bancoNome))
+                {
+                    bancoNome = "SICOOB";
+                }
 
                 string lineBx = BuildBaixaLine(
                     rowFil,
@@ -3672,12 +3780,12 @@ namespace ConvertFlow
                     0m,
                     0m,
                     rowCc,
-                    rawDesc,
+                    "",
                     rowFp,
                     GetFormaPgtoNome(rowFp),
                     rawIdLan,
-                    "",
-                    null,
+                    bancoNome,
+                    rawDoc,
                     nomeFuncTable,
                     compTable
                 );
