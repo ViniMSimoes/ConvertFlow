@@ -38,6 +38,7 @@ namespace ConvertFlow
         public decimal ValorOriginal;
         public string NumeroDocumento;
         public string IdFormaPagto;
+        public string Competencia;
         public bool Found;
     }
 
@@ -608,6 +609,36 @@ namespace ConvertFlow
                 if (s[i] < '0' || s[i] > '9') return false;
             }
             return true;
+        }
+
+        public static string ResolveCompetencia(string flanComp, string numDoc, string dtBaixa6)
+        {
+            if (!string.IsNullOrEmpty(flanComp)) return flanComp;
+
+            string cleanDoc = (numDoc ?? "").Trim();
+            if (cleanDoc.Length >= 6)
+            {
+                int y, m;
+                if (int.TryParse(cleanDoc.Substring(0, 4), out y) && y >= 1990 && y <= 2099 &&
+                    int.TryParse(cleanDoc.Substring(4, 2), out m) && m >= 1 && m <= 12)
+                {
+                    return string.Format("{0:D2}/{1:D4}", m, y);
+                }
+            }
+
+            string dt = (dtBaixa6 ?? "").Trim();
+            if (dt.Length == 6)
+            {
+                int m, yy;
+                if (int.TryParse(dt.Substring(2, 2), out m) && m >= 1 && m <= 12 &&
+                    int.TryParse(dt.Substring(4, 2), out yy))
+                {
+                    int yyyy = (yy >= 50) ? (1900 + yy) : (2000 + yy);
+                    return string.Format("{0:D2}/{1:D4}", m, yyyy);
+                }
+            }
+
+            return "";
         }
     }
 
@@ -3318,6 +3349,8 @@ namespace ConvertFlow
                 nomeFunc = favorecido;
             }
 
+            string comp = TotvsDbService.ResolveCompetencia(flan.Competencia, numDoc, dtBaixa6);
+
             return BuildBaixaLine(
                 finalFilial,
                 finalCliFor,
@@ -3335,7 +3368,8 @@ namespace ConvertFlow
                 idLan,
                 bancoNome,
                 histDoc,
-                nomeFunc
+                nomeFunc,
+                comp
             );
         }
 
@@ -3414,6 +3448,7 @@ namespace ConvertFlow
             }
 
             string nomeFuncTU = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+            string compTU = TotvsDbService.ResolveCompetencia(flan.Competencia, numDoc, dtBaixa6);
 
             return BuildBaixaLine(
                 finalFilial,
@@ -3432,7 +3467,8 @@ namespace ConvertFlow
                 idLan,
                 bancoNome,
                 histDoc,
-                nomeFuncTU
+                nomeFuncTU,
+                compTU
             );
         }
 
@@ -3497,6 +3533,7 @@ namespace ConvertFlow
                     }
 
                     string nomeFunc400 = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+                    string comp400 = TotvsDbService.ResolveCompetencia(flan.Competencia, numDoc, dtOcorr);
 
                     string lineBx = BuildBaixaLine(
                         finalFilial,
@@ -3515,7 +3552,8 @@ namespace ConvertFlow
                         idLan,
                         effectiveNomeBanco,
                         null,
-                        nomeFunc400
+                        nomeFunc400,
+                        comp400
                     );
                     resultLines.Add(lineBx);
                 }
@@ -3621,6 +3659,7 @@ namespace ConvertFlow
 
                 string nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf);
                 if (string.IsNullOrEmpty(nomeFuncTable)) nomeFuncTable = rawDesc;
+                string compTable = TotvsDbService.ResolveCompetencia(flan.Competencia, rawDoc, dtBaixa6);
 
                 string lineBx = BuildBaixaLine(
                     rowFil,
@@ -3639,7 +3678,8 @@ namespace ConvertFlow
                     rawIdLan,
                     "",
                     null,
-                    nomeFuncTable
+                    nomeFuncTable,
+                    compTable
                 );
                 resultLines.Add(lineBx);
             }
@@ -3774,7 +3814,8 @@ namespace ConvertFlow
             string idLan,
             string bancoNome,
             string histDoc = null,
-            string funcionarioNome = null)
+            string funcionarioNome = null,
+            string competencia = null)
         {
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
@@ -3785,6 +3826,13 @@ namespace ConvertFlow
                 vlrStr,
                 docForHist
             );
+
+            string compEfetiva = !string.IsNullOrEmpty(competencia) ? competencia : TotvsDbService.ResolveCompetencia("", docForHist, dtBaixa6);
+            if (!string.IsNullOrEmpty(compEfetiva))
+            {
+                histText += " - Competência: " + compEfetiva;
+            }
+
             string favEfetivo = !string.IsNullOrEmpty(bancoNome) ? bancoNome : favorecidoNome;
             string funcEfetivo = !string.IsNullOrEmpty(funcionarioNome) ? funcionarioNome : favorecidoNome;
 
