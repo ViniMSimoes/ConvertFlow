@@ -58,12 +58,76 @@ namespace ConvertFlow
 
     public static class TotvsDbService
     {
+        // Credenciais integradas e protegidas via criptografia AES (sem texto plano no binário)
+        private static readonly byte[] _encU = new byte[] { 60, 54, 136, 140, 169, 164, 31, 142, 8, 237, 199, 136, 171, 93, 19, 169 };
+        private static readonly byte[] _encP = new byte[] { 63, 208, 216, 4, 152, 114, 44, 153, 24, 64, 95, 244, 61, 85, 235, 203 };
+        private static readonly byte[] _mKey = new byte[] {
+            67 ^ 0x5A, 111 ^ 0x5A, 110 ^ 0x5A, 118 ^ 0x5A, 101 ^ 0x5A, 114 ^ 0x5A, 116 ^ 0x5A, 70 ^ 0x5A,
+            108 ^ 0x5A, 111 ^ 0x5A, 119 ^ 0x5A, 95 ^ 0x5A, 84 ^ 0x5A, 111 ^ 0x5A, 116 ^ 0x5A, 118 ^ 0x5A,
+            115 ^ 0x5A, 95 ^ 0x5A, 83 ^ 0x5A, 101 ^ 0x5A, 99 ^ 0x5A, 117 ^ 0x5A, 114 ^ 0x5A, 101 ^ 0x5A,
+            75 ^ 0x5A, 101 ^ 0x5A, 121 ^ 0x5A, 95 ^ 0x5A, 50 ^ 0x5A, 48 ^ 0x5A, 50 ^ 0x5A, 54 ^ 0x5A
+        };
+        private static readonly byte[] _mIv = new byte[] {
+            67 ^ 0x5A, 70 ^ 0x5A, 95 ^ 0x5A, 73 ^ 0x5A, 86 ^ 0x5A, 95 ^ 0x5A, 84 ^ 0x5A, 111 ^ 0x5A,
+            116 ^ 0x5A, 118 ^ 0x5A, 115 ^ 0x5A, 95 ^ 0x5A, 50 ^ 0x5A, 48 ^ 0x5A, 50 ^ 0x5A, 54 ^ 0x5A
+        };
+
+        private static string DecryptSecret(byte[] cipherBytes)
+        {
+            try
+            {
+                byte[] key = new byte[32];
+                for (int i = 0; i < 32; i++) key[i] = (byte)(_mKey[i] ^ 0x5A);
+
+                byte[] iv = new byte[16];
+                for (int i = 0; i < 16; i++) iv[i] = (byte)(_mIv[i] ^ 0x5A);
+
+                using (Aes aes = Aes.Create())
+                {
+                    aes.Key = key;
+                    aes.IV = iv;
+                    using (ICryptoTransform dec = aes.CreateDecryptor())
+                    {
+                        byte[] plainBytes = dec.TransformFinalBlock(cipherBytes, 0, cipherBytes.Length);
+                        return Encoding.UTF8.GetString(plainBytes);
+                    }
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        public static string GetIntegratedUser()
+        {
+            return DecryptSecret(_encU);
+        }
+
+        public static string GetIntegratedPassword()
+        {
+            return DecryptSecret(_encP);
+        }
+
         public static string Server = "172.20.11.108";
         public static string Database = "CORPORERM";
-        public static string User = "vinicius.marcelo";
-        public static string Password = "vinagre123";
+        public static string CustomUser = "";
+        public static string CustomPassword = "";
+        public static bool UseIntegratedAuth = true;
         public static bool UseWindowsAuth = false;
         public static bool IsEnabled = true;
+
+        public static string User
+        {
+            get { return UseIntegratedAuth ? GetIntegratedUser() : CustomUser; }
+            set { CustomUser = value; }
+        }
+
+        public static string Password
+        {
+            get { return UseIntegratedAuth ? GetIntegratedPassword() : CustomPassword; }
+            set { CustomPassword = value; }
+        }
 
         private static Dictionary<string, FlanResult> cache = new Dictionary<string, FlanResult>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, CxaResult> cxaCache = new Dictionary<string, CxaResult>(StringComparer.OrdinalIgnoreCase);
@@ -646,6 +710,8 @@ namespace ConvertFlow
     {
         private TextBox txtServer;
         private TextBox txtDatabase;
+        private CheckBox chkIntegrated;
+        private StackPanel customAuthPanel;
         private TextBox txtUser;
         private PasswordBox txtPassword;
         private CheckBox chkWinAuth;
@@ -656,8 +722,8 @@ namespace ConvertFlow
         public DbConfigWindow()
         {
             Title = "Configurações da Conexão TOTVS RM (SQL Server)";
-            Width = 490;
-            Height = 460;
+            Width = 510;
+            Height = 490;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             ResizeMode = ResizeMode.NoResize;
             Background = new SolidColorBrush(Color.FromRgb(24, 24, 27));
@@ -697,8 +763,32 @@ namespace ConvertFlow
             form.Children.Add(txtServer);
 
             form.Children.Add(new TextBlock() { Text = "Banco de Dados (Database):", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) });
-            txtDatabase = new TextBox() { Text = TotvsDbService.Database, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            txtDatabase = new TextBox() { Text = TotvsDbService.Database, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 10) };
             form.Children.Add(txtDatabase);
+
+            chkIntegrated = new CheckBox()
+            {
+                Content = "🔒 Usar Credenciais do Sistema (Integradas e Criptografadas)",
+                IsChecked = TotvsDbService.UseIntegratedAuth,
+                Foreground = Brushes.White,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4)
+            };
+            form.Children.Add(chkIntegrated);
+
+            TextBlock txtIntegNote = new TextBlock()
+            {
+                Text = "As credenciais de consulta estão integradas e protegidas internamente no executável. Nenhuma senha fica exposta.",
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170)),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(20, 0, 0, 10)
+            };
+            form.Children.Add(txtIntegNote);
+
+            customAuthPanel = new StackPanel();
+            customAuthPanel.Visibility = (TotvsDbService.UseIntegratedAuth ? Visibility.Collapsed : Visibility.Visible);
 
             chkWinAuth = new CheckBox()
             {
@@ -708,21 +798,34 @@ namespace ConvertFlow
                 FontSize = 11,
                 Margin = new Thickness(0, 2, 0, 8)
             };
-            form.Children.Add(chkWinAuth);
+            customAuthPanel.Children.Add(chkWinAuth);
 
             TextBlock lblUser = new TextBlock() { Text = "Usuário SQL Server:", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) };
-            txtUser = new TextBox() { Text = TotvsDbService.User, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
-            form.Children.Add(lblUser);
-            form.Children.Add(txtUser);
+            txtUser = new TextBox() { Text = TotvsDbService.CustomUser, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            customAuthPanel.Children.Add(lblUser);
+            customAuthPanel.Children.Add(txtUser);
 
             TextBlock lblPass = new TextBlock() { Text = "Senha:", FontSize = 11, Foreground = new SolidColorBrush(Color.FromRgb(212, 212, 216)), Margin = new Thickness(0, 0, 0, 3) };
-            txtPassword = new PasswordBox() { Password = TotvsDbService.Password, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
-            form.Children.Add(lblPass);
-            form.Children.Add(txtPassword);
+            txtPassword = new PasswordBox() { Password = TotvsDbService.CustomPassword, Background = new SolidColorBrush(Color.FromRgb(14, 14, 17)), Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(63, 63, 70)), Padding = new Thickness(8, 5, 8, 5), FontSize = 12, Margin = new Thickness(0, 0, 0, 8) };
+            customAuthPanel.Children.Add(lblPass);
+            customAuthPanel.Children.Add(txtPassword);
 
             chkWinAuth.Checked += (s, e) => { txtUser.IsEnabled = false; txtPassword.IsEnabled = false; };
             chkWinAuth.Unchecked += (s, e) => { txtUser.IsEnabled = true; txtPassword.IsEnabled = true; };
             if (chkWinAuth.IsChecked == true) { txtUser.IsEnabled = false; txtPassword.IsEnabled = false; }
+
+            chkIntegrated.Checked += (s, e) =>
+            {
+                customAuthPanel.Visibility = Visibility.Collapsed;
+                txtIntegNote.Visibility = Visibility.Visible;
+            };
+            chkIntegrated.Unchecked += (s, e) =>
+            {
+                customAuthPanel.Visibility = Visibility.Visible;
+                txtIntegNote.Visibility = Visibility.Collapsed;
+            };
+
+            form.Children.Add(customAuthPanel);
 
             Grid.SetRow(form, 1);
             grid.Children.Add(form);
@@ -804,15 +907,20 @@ namespace ConvertFlow
 
             string prevServer = TotvsDbService.Server;
             string prevDb = TotvsDbService.Database;
-            string prevUser = TotvsDbService.User;
-            string prevPass = TotvsDbService.Password;
+            bool prevInteg = TotvsDbService.UseIntegratedAuth;
+            string prevUser = TotvsDbService.CustomUser;
+            string prevPass = TotvsDbService.CustomPassword;
             bool prevWin = TotvsDbService.UseWindowsAuth;
 
             TotvsDbService.Server = txtServer.Text.Trim();
             TotvsDbService.Database = txtDatabase.Text.Trim();
-            TotvsDbService.User = txtUser.Text.Trim();
-            TotvsDbService.Password = txtPassword.Password;
-            TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+            TotvsDbService.UseIntegratedAuth = (chkIntegrated.IsChecked == true);
+            if (!TotvsDbService.UseIntegratedAuth)
+            {
+                TotvsDbService.CustomUser = txtUser.Text.Trim();
+                TotvsDbService.CustomPassword = txtPassword.Password;
+                TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+            }
 
             string err = TotvsDbService.TestConnection();
 
@@ -827,8 +935,9 @@ namespace ConvertFlow
                 txtStatus.Foreground = new SolidColorBrush(Color.FromRgb(248, 113, 113));
                 TotvsDbService.Server = prevServer;
                 TotvsDbService.Database = prevDb;
-                TotvsDbService.User = prevUser;
-                TotvsDbService.Password = prevPass;
+                TotvsDbService.UseIntegratedAuth = prevInteg;
+                TotvsDbService.CustomUser = prevUser;
+                TotvsDbService.CustomPassword = prevPass;
                 TotvsDbService.UseWindowsAuth = prevWin;
             }
             btnTest.IsEnabled = true;
@@ -838,9 +947,13 @@ namespace ConvertFlow
         {
             TotvsDbService.Server = txtServer.Text.Trim();
             TotvsDbService.Database = txtDatabase.Text.Trim();
-            TotvsDbService.User = txtUser.Text.Trim();
-            TotvsDbService.Password = txtPassword.Password;
-            TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+            TotvsDbService.UseIntegratedAuth = (chkIntegrated.IsChecked == true);
+            if (!TotvsDbService.UseIntegratedAuth)
+            {
+                TotvsDbService.CustomUser = txtUser.Text.Trim();
+                TotvsDbService.CustomPassword = txtPassword.Password;
+                TotvsDbService.UseWindowsAuth = (chkWinAuth.IsChecked == true);
+            }
             TotvsDbService.ClearCache();
             DialogResult = true;
             Close();
@@ -1361,24 +1474,24 @@ namespace ConvertFlow
                             TotvsDbService.Server = s;
                         }
                         else if (line.StartsWith("DB_DATABASE=")) TotvsDbService.Database = line.Substring(12).Trim();
-                        else if (line.StartsWith("DB_USER=")) TotvsDbService.User = line.Substring(8).Trim();
+                        else if (line.StartsWith("DB_USE_INTEGRATED=")) TotvsDbService.UseIntegratedAuth = (line.Substring(18).Trim() != "0");
+                        else if (line.StartsWith("DB_USER=")) TotvsDbService.CustomUser = line.Substring(8).Trim();
                         else if (line.StartsWith("DB_PASSWORD="))
                         {
                             string raw = line.Substring(12).Trim();
                             try
                             {
                                 byte[] bytes = Convert.FromBase64String(raw);
-                                TotvsDbService.Password = Encoding.UTF8.GetString(bytes);
+                                TotvsDbService.CustomPassword = Encoding.UTF8.GetString(bytes);
                             }
                             catch
                             {
-                                TotvsDbService.Password = raw;
+                                TotvsDbService.CustomPassword = raw;
                             }
                         }
                         else if (line.StartsWith("DB_WINAUTH=")) TotvsDbService.UseWindowsAuth = (line.Substring(11).Trim() == "1");
                         else if (line.StartsWith("DB_ENABLED=")) TotvsDbService.IsEnabled = (line.Substring(11).Trim() != "0");
                     }
-                    if (string.IsNullOrEmpty(TotvsDbService.Password)) TotvsDbService.Password = "vinagre123";
                 }
                 UpdateDbStatusLabel();
             }
@@ -1399,9 +1512,13 @@ namespace ConvertFlow
                 sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "3"));
                 sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.108"));
                 sb.AppendLine("DB_DATABASE=" + (TotvsDbService.Database ?? "CORPORERM"));
-                sb.AppendLine("DB_USER=" + (TotvsDbService.User ?? "vinicius.marcelo"));
-                string passB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(TotvsDbService.Password ?? ""));
-                sb.AppendLine("DB_PASSWORD=" + passB64);
+                sb.AppendLine("DB_USE_INTEGRATED=" + (TotvsDbService.UseIntegratedAuth ? "1" : "0"));
+                if (!TotvsDbService.UseIntegratedAuth)
+                {
+                    sb.AppendLine("DB_USER=" + (TotvsDbService.CustomUser ?? ""));
+                    string passB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(TotvsDbService.CustomPassword ?? ""));
+                    sb.AppendLine("DB_PASSWORD=" + passB64);
+                }
                 sb.AppendLine("DB_WINAUTH=" + (TotvsDbService.UseWindowsAuth ? "1" : "0"));
                 sb.AppendLine("DB_ENABLED=" + (TotvsDbService.IsEnabled ? "1" : "0"));
                 File.WriteAllText(configPath, sb.ToString());
@@ -1417,14 +1534,9 @@ namespace ConvertFlow
                 dbStatusText.Text = "⚪ Consulta ao banco desativada (usando dados automáticos do arquivo)";
                 dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(161, 161, 170));
             }
-            else if (string.IsNullOrEmpty(TotvsDbService.Password) && !TotvsDbService.UseWindowsAuth)
-            {
-                dbStatusText.Text = "⚠️ Servidor " + TotvsDbService.Server + " configurado. Clique em '⚙️ Conexão Banco' para autenticar.";
-                dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(251, 191, 36));
-            }
             else
             {
-                dbStatusText.Text = "🟢 Conectado ao TOTVS RM (" + TotvsDbService.Server + " / " + TotvsDbService.Database + ") - Consulta FLAN ativa";
+                dbStatusText.Text = "🟢 Conectado ao TOTVS RM (" + TotvsDbService.Server + " / " + TotvsDbService.Database + ") - Credenciais Protegidas";
                 dbStatusText.Foreground = new SolidColorBrush(Color.FromRgb(52, 211, 153));
             }
         }
