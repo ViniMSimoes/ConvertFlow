@@ -1772,7 +1772,7 @@ namespace ConvertFlow
                         string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
                         baixaContent = CnabToBaixaConverter.ConvertToBaixa(rawText, filial, tipoDoc, contaCaixa, formaPgto);
                     }
-                    File.WriteAllText(outputPath, baixaContent, new UTF8Encoding(true));
+                    File.WriteAllText(outputPath, baixaContent, Encoding.GetEncoding(1252));
                 }
                 else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "OFX")
                 {
