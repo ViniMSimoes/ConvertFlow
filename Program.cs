@@ -66,6 +66,7 @@ namespace ConvertFlow
 
         private static Dictionary<string, FlanResult> cache = new Dictionary<string, FlanResult>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, CxaResult> cxaCache = new Dictionary<string, CxaResult>(StringComparer.OrdinalIgnoreCase);
+        private static Dictionary<string, string> funcCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public static void ClearCache()
         {
@@ -76,6 +77,10 @@ namespace ConvertFlow
             lock (cxaCache)
             {
                 cxaCache.Clear();
+            }
+            lock (funcCache)
+            {
+                funcCache.Clear();
             }
         }
 
@@ -506,6 +511,103 @@ namespace ConvertFlow
         public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
         {
             return QueryLancamento(docNum, cpfCnpj, "", valor);
+        }
+
+        public static string QueryFuncionarioByChapa(string docNum, string cpf = "")
+        {
+            if (!IsEnabled) return null;
+            if (string.IsNullOrEmpty(docNum) && string.IsNullOrEmpty(cpf)) return null;
+
+            string cleanDoc = (docNum ?? "").Trim();
+            string cleanCpf = (cpf ?? "").Replace(".", "").Replace("-", "").Replace("/", "").Trim();
+
+            string chapa = "";
+            if (cleanDoc.Length == 12 && (cleanDoc.StartsWith("20") || cleanDoc.StartsWith("19")))
+            {
+                chapa = cleanDoc.Substring(6, 6);
+            }
+            else if (cleanDoc.Length >= 6 && IsAllDigits(cleanDoc))
+            {
+                chapa = cleanDoc.Substring(cleanDoc.Length - 6);
+            }
+            else if (cleanDoc.Length > 0 && cleanDoc.Length < 6 && IsAllDigits(cleanDoc))
+            {
+                chapa = cleanDoc.PadLeft(6, '0');
+            }
+
+            string cacheKey = string.Format("{0}|{1}", chapa, cleanCpf);
+            lock (funcCache)
+            {
+                if (funcCache.ContainsKey(cacheKey)) return funcCache[cacheKey];
+            }
+
+            string nomeEncontrado = null;
+
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                {
+                    conn.Open();
+
+                    // 1. Busca por CHAPA na tabela PFUNC
+                    if (!string.IsNullOrEmpty(chapa))
+                    {
+                        string sqlChapa = "SELECT TOP 1 NOME FROM DBO.PFUNC WITH (NOLOCK) WHERE CHAPA = @Chapa";
+                        using (SqlCommand cmd = new SqlCommand(sqlChapa, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Chapa", chapa);
+                            object obj = cmd.ExecuteScalar();
+                            if (obj != null && obj != DBNull.Value)
+                            {
+                                string val = obj.ToString().Trim();
+                                if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
+                            }
+                        }
+                    }
+
+                    // 2. Se não encontrou por CHAPA e tem CPF, busca por CPF via PPESSOA
+                    if (string.IsNullOrEmpty(nomeEncontrado) && cleanCpf.Length >= 11)
+                    {
+                        string sqlCpf = @"SELECT TOP 1 F.NOME 
+                                          FROM DBO.PFUNC F WITH (NOLOCK) 
+                                          INNER JOIN DBO.PPESSOA P WITH (NOLOCK) ON F.CODPESSOA = P.CODIGO 
+                                          WHERE REPLACE(REPLACE(REPLACE(P.CPF, '.', ''), '-', ''), '/', '') = @Cpf";
+                        using (SqlCommand cmd = new SqlCommand(sqlCpf, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
+                            object obj = cmd.ExecuteScalar();
+                            if (obj != null && obj != DBNull.Value)
+                            {
+                                string val = obj.ToString().Trim();
+                                if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Silencioso
+            }
+
+            lock (funcCache)
+            {
+                funcCache[cacheKey] = nomeEncontrado;
+            }
+
+            return nomeEncontrado;
+        }
+
+        private static bool IsAllDigits(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (s[i] < '0' || s[i] > '9') return false;
+            }
+            return true;
         }
     }
 
@@ -3209,6 +3311,13 @@ namespace ConvertFlow
                 numFp = "3";
             }
 
+            // Consulta nome do funcionário no banco TOTVS RM (PFUNC) com base na chapa contida no número do documento
+            string nomeFunc = TotvsDbService.QueryFuncionarioByChapa(numDoc, cpfCnpj);
+            if (string.IsNullOrEmpty(nomeFunc))
+            {
+                nomeFunc = favorecido;
+            }
+
             return BuildBaixaLine(
                 finalFilial,
                 finalCliFor,
@@ -3225,7 +3334,8 @@ namespace ConvertFlow
                 GetFormaPgtoNome(numFp),
                 idLan,
                 bancoNome,
-                histDoc
+                histDoc,
+                nomeFunc
             );
         }
 
@@ -3303,6 +3413,8 @@ namespace ConvertFlow
                 numFp = "3";
             }
 
+            string nomeFuncTU = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+
             return BuildBaixaLine(
                 finalFilial,
                 finalCliFor,
@@ -3319,7 +3431,8 @@ namespace ConvertFlow
                 GetFormaPgtoNome(numFp),
                 idLan,
                 bancoNome,
-                histDoc
+                histDoc,
+                nomeFuncTU
             );
         }
 
@@ -3383,6 +3496,8 @@ namespace ConvertFlow
                         numFp = "3";
                     }
 
+                    string nomeFunc400 = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+
                     string lineBx = BuildBaixaLine(
                         finalFilial,
                         finalCliFor,
@@ -3398,7 +3513,9 @@ namespace ConvertFlow
                         numFp,
                         GetFormaPgtoNome(numFp),
                         idLan,
-                        effectiveNomeBanco
+                        effectiveNomeBanco,
+                        null,
+                        nomeFunc400
                     );
                     resultLines.Add(lineBx);
                 }
@@ -3502,6 +3619,9 @@ namespace ConvertFlow
 
                 if (string.IsNullOrEmpty(rowTd)) rowTd = codTipoDoc;
 
+                string nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf);
+                if (string.IsNullOrEmpty(nomeFuncTable)) nomeFuncTable = rawDesc;
+
                 string lineBx = BuildBaixaLine(
                     rowFil,
                     rawCpf,
@@ -3516,7 +3636,10 @@ namespace ConvertFlow
                     rawDesc,
                     rowFp,
                     GetFormaPgtoNome(rowFp),
-                    rawIdLan
+                    rawIdLan,
+                    "",
+                    null,
+                    nomeFuncTable
                 );
                 resultLines.Add(lineBx);
             }
@@ -3650,7 +3773,8 @@ namespace ConvertFlow
             string formaPgtoNome,
             string idLan,
             string bancoNome,
-            string histDoc = null)
+            string histDoc = null,
+            string funcionarioNome = null)
         {
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
@@ -3662,10 +3786,24 @@ namespace ConvertFlow
                 docForHist
             );
             string favEfetivo = !string.IsNullOrEmpty(bancoNome) ? bancoNome : favorecidoNome;
+            string funcEfetivo = !string.IsNullOrEmpty(funcionarioNome) ? funcionarioNome : favorecidoNome;
+
             if (!string.IsNullOrEmpty(favEfetivo))
             {
-                histText += " - Favorecido: " + favEfetivo;
+                if (!string.IsNullOrEmpty(funcEfetivo) && !favEfetivo.Equals(funcEfetivo, StringComparison.OrdinalIgnoreCase))
+                {
+                    histText += string.Format(" - Favorecido: {0} - {1}", favEfetivo, funcEfetivo);
+                }
+                else
+                {
+                    histText += " - Favorecido: " + favEfetivo;
+                }
             }
+            else if (!string.IsNullOrEmpty(funcEfetivo))
+            {
+                histText += " - Favorecido: " + funcEfetivo;
+            }
+
             return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, "");
         }
 
