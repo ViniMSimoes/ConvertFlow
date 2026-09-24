@@ -290,51 +290,12 @@ namespace ConvertFlow
                 {
                     conn.Open();
 
-                    // 0. Busca prioritária em FLAN por Número do Documento / IDLAN / Nosso Número (Prioriza STATUSLAN = 0)
-                    if (!string.IsNullOrEmpty(cleanDoc))
-                    {
-                        string docTail = (cleanDocNoZeros.Length >= 6) ? cleanDocNoZeros.Substring(cleanDocNoZeros.Length - 6) : cleanDocNoZeros;
-                        string sqlDoc = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
-                                          FROM DBO.FLAN WITH (NOLOCK) 
-                                          WHERE (STATUSLAN = 0 OR STATUSLAN = 1)
-                                            AND (NUMERODOCUMENTO = @Doc 
-                                                 OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
-                                                 OR IPTE = @Doc
-                                                 OR SEGUNDONUMERO = @Doc
-                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
-                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocTail
-                                                 OR (@DocClean LIKE '%' + CAST(IDLAN AS VARCHAR(20)) AND IDLAN >= 100000))
-                                          ORDER BY STATUSLAN ASC, IDLAN DESC";
-
-                        using (SqlCommand cmd = new SqlCommand(sqlDoc, conn))
-                        {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Doc", cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocTail", docTail.Length > 0 ? docTail : cleanDoc);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
-                            {
-                                if (reader.Read())
-                                {
-                                    res.Found = true;
-                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
-                            }
-                        }
-                    }
-
                     string resolvedCfo = null;
-
-                    // 1. Se não encontrou por documento, busca primeiro em FCFO por CPF/CNPJ
-                    if (!res.Found && cleanCpf.Length >= 11)
+                    if (cleanCpf.Length >= 2 && (cleanCpf.StartsWith("F") || cleanCpf.StartsWith("C") || cleanCpf.StartsWith("A") || cleanCpf.StartsWith("L") || cleanCpf.StartsWith("M")))
+                    {
+                        resolvedCfo = cleanCpf;
+                    }
+                    else if (cleanCpf.Length >= 11)
                     {
                         string sqlCfo = @"SELECT TOP 1 CODCFO 
                                           FROM DBO.FCFO WITH (NOLOCK) 
@@ -355,7 +316,7 @@ namespace ConvertFlow
                     }
 
                     // Se não encontrou por CPF e tem favorecido, busca por Nome em FCFO
-                    if (!res.Found && string.IsNullOrEmpty(resolvedCfo) && cleanFav.Length >= 4)
+                    if (string.IsNullOrEmpty(resolvedCfo) && cleanFav.Length >= 4)
                     {
                         string favPrefix = cleanFav.Substring(0, Math.Min(15, cleanFav.Length)).Trim();
                         string sqlFav = @"SELECT TOP 1 CODCFO 
@@ -374,25 +335,61 @@ namespace ConvertFlow
                         }
                     }
 
-                    if (!res.Found && string.IsNullOrEmpty(resolvedCfo) && cleanCpf.Length >= 2 && (cleanCpf.StartsWith("F") || cleanCpf.StartsWith("C")))
-                    {
-                        resolvedCfo = cleanCpf;
-                    }
-
-                    if (!res.Found && !string.IsNullOrEmpty(resolvedCfo))
+                    if (!string.IsNullOrEmpty(resolvedCfo))
                     {
                         res.CodCfo = resolvedCfo;
                     }
 
-                    // 2. Consulta em FLAN com resolvedCfo + Valor (Prioriza STATUSLAN = 0)
-                    if (!string.IsNullOrEmpty(resolvedCfo))
+                    // 1. Se tem resolvedCfo e documento, busca com máxima precisão no cliente/fornecedor (Prioriza STATUSLAN = 0)
+                    if (!string.IsNullOrEmpty(resolvedCfo) && !string.IsNullOrEmpty(cleanDoc))
+                    {
+                        string docTail = (cleanDocNoZeros.Length >= 6) ? cleanDocNoZeros.Substring(cleanDocNoZeros.Length - 6) : cleanDocNoZeros;
+                        string sqlDocCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                             FROM DBO.FLAN WITH (NOLOCK) 
+                                             WHERE CODCFO = @Cfo
+                                               AND (STATUSLAN = 0 OR STATUSLAN = 1)
+                                               AND (NUMERODOCUMENTO = @Doc 
+                                                    OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                                    OR IPTE = @Doc
+                                                    OR SEGUNDONUMERO = @Doc
+                                                    OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
+                                                    OR CAST(IDLAN AS VARCHAR(20)) = @DocTail)
+                                             ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlDocCfo, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                            cmd.Parameters.AddWithValue("@Doc", cleanDoc);
+                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
+                            cmd.Parameters.AddWithValue("@DocTail", docTail.Length > 0 ? docTail : cleanDoc);
+
+                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    res.Found = true;
+                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. Se tem resolvedCfo e valor (e não achou por doc), busca no cliente por valor (Prioriza STATUSLAN = 0)
+                    if (!res.Found && !string.IsNullOrEmpty(resolvedCfo) && valor > 0m)
                     {
                         string sqlFlanCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
                                               FROM DBO.FLAN WITH (NOLOCK) 
                                               WHERE CODCFO = @Cfo 
                                                 AND (STATUSLAN = 0 OR STATUSLAN = 1)
-                                                AND (ABS(VALORORIGINAL - @Valor) < 0.05 
-                                                     OR @Valor = 0)
+                                                AND ABS(VALORORIGINAL - @Valor) < 0.05
                                               ORDER BY STATUSLAN ASC, IDLAN DESC";
 
                         using (SqlCommand cmd = new SqlCommand(sqlFlanCfo, conn))
@@ -417,50 +414,12 @@ namespace ConvertFlow
                                 }
                             }
                         }
-
-                        // 2B. Se tem resolvedCfo e número de documento, busca dentro do cliente/fornecedor (Prioriza STATUSLAN = 0)
-                        if (!res.Found && !string.IsNullOrEmpty(cleanDoc))
-                        {
-                            string sqlDocCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
-                                                 FROM DBO.FLAN WITH (NOLOCK) 
-                                                 WHERE CODCFO = @Cfo
-                                                   AND (STATUSLAN = 0 OR STATUSLAN = 1)
-                                                   AND (NUMERODOCUMENTO = @Doc 
-                                                        OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
-                                                        OR IPTE = @Doc
-                                                        OR SEGUNDONUMERO = @Doc
-                                                        OR CAST(IDLAN AS VARCHAR(20)) = @DocClean)
-                                                 ORDER BY STATUSLAN ASC, IDLAN DESC";
-
-                            using (SqlCommand cmd = new SqlCommand(sqlDocCfo, conn))
-                            {
-                                cmd.CommandTimeout = 4;
-                                cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
-                                cmd.Parameters.AddWithValue("@Doc", cleanDoc);
-                                cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
-
-                                using (SqlDataReader reader = cmd.ExecuteReader())
-                                {
-                                    if (reader.Read())
-                                    {
-                                        res.Found = true;
-                                        res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                        res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                        res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                        res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
-                                        res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                        res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                        res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                        if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                    }
-                                }
-                            }
-                        }
                     }
 
-                    // 3. Busca por Número do Documento / IDLAN (Prioriza STATUSLAN = 0)
-                    if (!res.Found && !string.IsNullOrEmpty(cleanDoc))
+                    // 3. Busca global por Documento / IDLAN / Nosso Número (Apenas se documento for longo/específico >= 6 dígitos)
+                    if (!res.Found && !string.IsNullOrEmpty(cleanDoc) && cleanDocNoZeros.Length >= 6)
                     {
+                        string docTail = (cleanDocNoZeros.Length >= 6) ? cleanDocNoZeros.Substring(cleanDocNoZeros.Length - 6) : cleanDocNoZeros;
                         string sqlDoc = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
                                           FROM DBO.FLAN WITH (NOLOCK) 
                                           WHERE (STATUSLAN = 0 OR STATUSLAN = 1)
@@ -468,7 +427,9 @@ namespace ConvertFlow
                                                  OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
                                                  OR IPTE = @Doc
                                                  OR SEGUNDONUMERO = @Doc
-                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocClean)
+                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
+                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocTail
+                                                 OR (@DocClean LIKE '%' + CAST(IDLAN AS VARCHAR(20)) AND IDLAN >= 100000))
                                           ORDER BY STATUSLAN ASC, IDLAN DESC";
 
                         using (SqlCommand cmd = new SqlCommand(sqlDoc, conn))
@@ -476,6 +437,7 @@ namespace ConvertFlow
                             cmd.CommandTimeout = 4;
                             cmd.Parameters.AddWithValue("@Doc", cleanDoc);
                             cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
+                            cmd.Parameters.AddWithValue("@DocTail", docTail.Length > 0 ? docTail : cleanDoc);
 
                             using (SqlDataReader reader = cmd.ExecuteReader())
                             {
