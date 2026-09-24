@@ -37,15 +37,16 @@ namespace ConvertFlow
         public string CodConta;
         public decimal ValorOriginal;
         public string NumeroDocumento;
+        public string IdFormaPagto;
         public bool Found;
     }
 
     public static class TotvsDbService
     {
-        public static string Server = "172.20.11.113";
+        public static string Server = "172.20.11.108";
         public static string Database = "CORPORERM";
         public static string User = "vinicius.marcelo";
-        public static string Password = "";
+        public static string Password = "vinagre123";
         public static bool UseWindowsAuth = false;
         public static bool IsEnabled = true;
 
@@ -99,7 +100,7 @@ namespace ConvertFlow
             }
         }
 
-        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, string favorecido, decimal valor)
         {
             FlanResult res = new FlanResult();
             res.Found = false;
@@ -109,8 +110,10 @@ namespace ConvertFlow
             string cleanDoc = (docNum ?? "").Trim();
             string cleanDocNoZeros = cleanDoc.TrimStart('0');
             string cleanCpf = (cpfCnpj ?? "").Replace(".", "").Replace("-", "").Replace("/", "").Trim();
+            string cleanCpfNoZeros = cleanCpf.TrimStart('0');
+            string cleanFav = (favorecido ?? "").Trim();
 
-            string cacheKey = string.Format("{0}|{1}|{2}", cleanDoc, cleanCpf, valor);
+            string cacheKey = string.Format("{0}|{1}|{2}|{3}", cleanDoc, cleanCpf, cleanFav, valor);
             lock (cache)
             {
                 if (cache.ContainsKey(cacheKey)) return cache[cacheKey];
@@ -122,18 +125,176 @@ namespace ConvertFlow
                 {
                     conn.Open();
 
-                    if (!string.IsNullOrEmpty(cleanDoc))
-                    {
-                        string sql = @"SELECT TOP 1 IDLAN, CODTIPODOC, CODFILIAL, CODCFO, CODCONTA, VALORORIGINAL, NUMERODOCUMENTO 
-                                       FROM DBO.FLAN WITH (NOLOCK) 
-                                       WHERE NUMERODOCUMENTO = @Doc 
-                                          OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
-                                          OR IPTE = @Doc
-                                          OR NOSSONUMERO = @Doc
-                                          OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
-                                       ORDER BY STATUSLAN ASC, IDLAN DESC";
+                    string resolvedCfo = null;
 
-                        using (SqlCommand cmd = new SqlCommand(sql, conn))
+                    // 1. Busca primeiro em FCFO por CPF/CNPJ
+                    if (cleanCpf.Length >= 11)
+                    {
+                        string sqlCfo = @"SELECT TOP 1 CODCFO 
+                                          FROM DBO.FCFO WITH (NOLOCK) 
+                                          WHERE REPLACE(REPLACE(REPLACE(CGCCFO, '.', ''), '-', ''), '/', '') = @Cpf
+                                             OR REPLACE(REPLACE(REPLACE(CGCCFO, '.', ''), '-', ''), '/', '') = @CpfNoZeros";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlCfo, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
+                            cmd.Parameters.AddWithValue("@CpfNoZeros", cleanCpfNoZeros.Length > 0 ? cleanCpfNoZeros : cleanCpf);
+                            object obj = cmd.ExecuteScalar();
+                            if (obj != null && obj != DBNull.Value)
+                            {
+                                resolvedCfo = obj.ToString().Trim();
+                            }
+                        }
+                    }
+
+                    // Se não encontrou por CPF e tem favorecido, busca por Nome em FCFO
+                    if (string.IsNullOrEmpty(resolvedCfo) && cleanFav.Length >= 4)
+                    {
+                        string favPrefix = cleanFav.Substring(0, Math.Min(15, cleanFav.Length)).Trim();
+                        string sqlFav = @"SELECT TOP 1 CODCFO 
+                                          FROM DBO.FCFO WITH (NOLOCK) 
+                                          WHERE NOME LIKE @FavPrefix + '%'";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlFav, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@FavPrefix", favPrefix);
+                            object obj = cmd.ExecuteScalar();
+                            if (obj != null && obj != DBNull.Value)
+                            {
+                                resolvedCfo = obj.ToString().Trim();
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(resolvedCfo) && cleanCpf.Length >= 2 && (cleanCpf.StartsWith("F") || cleanCpf.StartsWith("C")))
+                    {
+                        resolvedCfo = cleanCpf;
+                    }
+
+                    if (!string.IsNullOrEmpty(resolvedCfo))
+                    {
+                        res.CodCfo = resolvedCfo;
+                    }
+
+                    // 2. Consulta em FLAN com resolvedCfo + Valor (com tolerância e escala de decimais /10 ou *10)
+                    if (!string.IsNullOrEmpty(resolvedCfo))
+                    {
+                        string sqlFlanCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                              FROM DBO.FLAN WITH (NOLOCK) 
+                                              WHERE CODCFO = @Cfo 
+                                                AND (ABS(VALORORIGINAL - @Valor) < 0.05 
+                                                     OR ABS(VALORORIGINAL - (@Valor / 10.0)) < 0.05 
+                                                     OR ABS(VALORORIGINAL - (@Valor * 10.0)) < 0.05 
+                                                     OR @Valor = 0)
+                                              ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlFlanCfo, conn))
+                        {
+                            cmd.CommandTimeout = 4;
+                            cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                            cmd.Parameters.AddWithValue("@Valor", valor);
+
+                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            {
+                                if (reader.Read())
+                                {
+                                    res.Found = true;
+                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                }
+                            }
+                        }
+
+                        // 2B. Se tem resolvedCfo e número de documento, busca dentro do cliente/fornecedor
+                        if (!res.Found && !string.IsNullOrEmpty(cleanDoc))
+                        {
+                            string sqlDocCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                                 FROM DBO.FLAN WITH (NOLOCK) 
+                                                 WHERE CODCFO = @Cfo
+                                                   AND (NUMERODOCUMENTO = @Doc 
+                                                        OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                                        OR IPTE = @Doc
+                                                        OR SEGUNDONUMERO = @Doc
+                                                        OR CAST(IDLAN AS VARCHAR(20)) = @DocClean)
+                                                 ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                            using (SqlCommand cmd = new SqlCommand(sqlDocCfo, conn))
+                            {
+                                cmd.CommandTimeout = 4;
+                                cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                                cmd.Parameters.AddWithValue("@Doc", cleanDoc);
+                                cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
+
+                                using (SqlDataReader reader = cmd.ExecuteReader())
+                                {
+                                    if (reader.Read())
+                                    {
+                                        res.Found = true;
+                                        res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                        res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                        res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                        res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                        res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                        res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                        res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                        if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2C. Se ainda não encontrou e resolvedCfo está definido, pega o mais recente do cliente
+                        if (!res.Found)
+                        {
+                            string sqlLast = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                               FROM DBO.FLAN WITH (NOLOCK) 
+                                               WHERE CODCFO = @Cfo
+                                               ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                            using (SqlCommand cmd = new SqlCommand(sqlLast, conn))
+                            {
+                                cmd.CommandTimeout = 4;
+                                cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                                using (SqlDataReader reader = cmd.ExecuteReader())
+                                {
+                                    if (reader.Read())
+                                    {
+                                        res.Found = true;
+                                        res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                        res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                        res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                        res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                        res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                        res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                        res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                        if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Se NÃO tem resolvedCfo (cliente desconhecido), busca por Número do Documento
+                    if (!res.Found && string.IsNullOrEmpty(resolvedCfo) && !string.IsNullOrEmpty(cleanDoc))
+                    {
+                        string sqlDoc = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                          FROM DBO.FLAN WITH (NOLOCK) 
+                                          WHERE NUMERODOCUMENTO = @Doc 
+                                             OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                             OR IPTE = @Doc
+                                             OR SEGUNDONUMERO = @Doc
+                                             OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
+                                          ORDER BY STATUSLAN ASC, IDLAN DESC";
+
+                        using (SqlCommand cmd = new SqlCommand(sqlDoc, conn))
                         {
                             cmd.CommandTimeout = 4;
                             cmd.Parameters.AddWithValue("@Doc", cleanDoc);
@@ -145,71 +306,44 @@ namespace ConvertFlow
                                 {
                                     res.Found = true;
                                     res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
                                     res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
                                     res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                    res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
+                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
                                     res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
                                     if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
-                            }
-                        }
-
-                        if (!res.Found && cleanDocNoZeros.Length >= 4)
-                        {
-                            string sqlLike = @"SELECT TOP 1 IDLAN, CODTIPODOC, CODFILIAL, CODCFO, CODCONTA, VALORORIGINAL, NUMERODOCUMENTO 
-                                               FROM DBO.FLAN WITH (NOLOCK) 
-                                               WHERE NUMERODOCUMENTO LIKE '%' + @DocClean
-                                               ORDER BY STATUSLAN ASC, IDLAN DESC";
-
-                            using (SqlCommand cmd = new SqlCommand(sqlLike, conn))
-                            {
-                                cmd.CommandTimeout = 4;
-                                cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros);
-                                using (SqlDataReader reader = cmd.ExecuteReader())
-                                {
-                                    if (reader.Read())
-                                    {
-                                        res.Found = true;
-                                        res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                        res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
-                                        res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                        res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                        res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
-                                        res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                        if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                    }
                                 }
                             }
                         }
                     }
 
-                    if (!res.Found && !string.IsNullOrEmpty(cleanCpf) && valor > 0m)
+                    // 4. Se ainda não encontrou e NÃO tem resolvedCfo, tenta busca LIKE por documento (mínimo 6 dígitos)
+                    if (!res.Found && string.IsNullOrEmpty(resolvedCfo) && cleanDocNoZeros.Length >= 6)
                     {
-                        string sqlCpf = @"SELECT TOP 1 F.IDLAN, F.CODTIPODOC, F.CODFILIAL, F.CODCFO, F.CODCONTA, F.VALORORIGINAL, F.NUMERODOCUMENTO 
-                                          FROM DBO.FLAN F WITH (NOLOCK)
-                                          INNER JOIN DBO.FCFO C WITH (NOLOCK) ON F.CODCOLIGADA = C.CODCOLIGADA AND F.CODCFO = C.CODCFO
-                                          WHERE REPLACE(REPLACE(REPLACE(C.CGCCFO, '.', ''), '-', ''), '/', '') = @Cpf
-                                            AND ABS(F.VALORORIGINAL - @Valor) < 0.05
-                                          ORDER BY F.STATUSLAN ASC, F.IDLAN DESC";
+                        string sqlLike = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                           FROM DBO.FLAN WITH (NOLOCK) 
+                                           WHERE NUMERODOCUMENTO LIKE '%' + @DocClean
+                                              OR IPTE LIKE '%' + @DocClean
+                                              OR SEGUNDONUMERO LIKE '%' + @DocClean
+                                           ORDER BY STATUSLAN ASC, IDLAN DESC";
 
-                        using (SqlCommand cmd = new SqlCommand(sqlCpf, conn))
+                        using (SqlCommand cmd = new SqlCommand(sqlLike, conn))
                         {
                             cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
-                            cmd.Parameters.AddWithValue("@Valor", valor);
-
+                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros);
                             using (SqlDataReader reader = cmd.ExecuteReader())
                             {
                                 if (reader.Read())
                                 {
                                     res.Found = true;
                                     res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTIPODOC"] != DBNull.Value ? reader["CODTIPODOC"].ToString().Trim() : "";
+                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
                                     res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
                                     res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                    res.CodConta = reader["CODCONTA"] != DBNull.Value ? reader["CODCONTA"].ToString().Trim() : "";
+                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
                                     res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
                                     if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
                                 }
                             }
@@ -219,7 +353,7 @@ namespace ConvertFlow
             }
             catch
             {
-                // Silently fails and falls back to default if connection is offline
+                // Falha silenciosa caso o banco esteja indisponível
             }
 
             lock (cache)
@@ -227,6 +361,11 @@ namespace ConvertFlow
                 cache[cacheKey] = res;
             }
             return res;
+        }
+
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
+        {
+            return QueryLancamento(docNum, cpfCnpj, "", valor);
         }
     }
 
@@ -458,7 +597,7 @@ namespace ConvertFlow
         private string currentFilial = "0002";
         private string currentTipoDoc = "ICOP";
         private string currentContaCaixa = "1";
-        private string currentFormaPgto = "12";
+        private string currentFormaPgto = "3";
         private Button convertButton;
         private Border resultPanel;
         private TextBlock resultPathText;
@@ -926,8 +1065,18 @@ namespace ConvertFlow
                         else if (line.StartsWith("FILIAL=")) currentFilial = line.Substring(7).Trim();
                         else if (line.StartsWith("TIPODOC=")) currentTipoDoc = line.Substring(8).Trim();
                         else if (line.StartsWith("CONTACAIXA=")) currentContaCaixa = line.Substring(11).Trim();
-                        else if (line.StartsWith("FORMAPGTO=")) currentFormaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(line.Substring(10).Trim());
-                        else if (line.StartsWith("DB_SERVER=")) TotvsDbService.Server = line.Substring(10).Trim();
+                        else if (line.StartsWith("FORMAPGTO="))
+                        {
+                            string fp = line.Substring(10).Trim();
+                            if (fp == "12" || string.IsNullOrEmpty(fp)) fp = "3";
+                            currentFormaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(fp);
+                        }
+                        else if (line.StartsWith("DB_SERVER="))
+                        {
+                            string s = line.Substring(10).Trim();
+                            if (s == "172.20.11.113") s = "172.20.11.108";
+                            TotvsDbService.Server = s;
+                        }
                         else if (line.StartsWith("DB_DATABASE=")) TotvsDbService.Database = line.Substring(12).Trim();
                         else if (line.StartsWith("DB_USER=")) TotvsDbService.User = line.Substring(8).Trim();
                         else if (line.StartsWith("DB_PASSWORD="))
@@ -946,6 +1095,7 @@ namespace ConvertFlow
                         else if (line.StartsWith("DB_WINAUTH=")) TotvsDbService.UseWindowsAuth = (line.Substring(11).Trim() == "1");
                         else if (line.StartsWith("DB_ENABLED=")) TotvsDbService.IsEnabled = (line.Substring(11).Trim() != "0");
                     }
+                    if (string.IsNullOrEmpty(TotvsDbService.Password)) TotvsDbService.Password = "vinagre123";
                 }
                 UpdateDbStatusLabel();
             }
@@ -963,8 +1113,8 @@ namespace ConvertFlow
                 sb.AppendLine("FILIAL=" + (currentFilial ?? "0002"));
                 sb.AppendLine("TIPODOC=" + (currentTipoDoc ?? "ICOP"));
                 sb.AppendLine("CONTACAIXA=" + (currentContaCaixa ?? "1"));
-                sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "12"));
-                sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.113"));
+                sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "3"));
+                sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.108"));
                 sb.AppendLine("DB_DATABASE=" + (TotvsDbService.Database ?? "CORPORERM"));
                 sb.AppendLine("DB_USER=" + (TotvsDbService.User ?? "vinicius.marcelo"));
                 string passB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(TotvsDbService.Password ?? ""));
@@ -1195,15 +1345,7 @@ namespace ConvertFlow
                         {
                             if (l.Length >= 240 && l.Length > 13 && l.Substring(7, 1) == "1")
                             {
-                                string formaLanc = l.Substring(11, 2);
-                                if (formaLanc == "30" || formaLanc == "31")
-                                {
-                                    currentFormaPgto = "3";
-                                }
-                                else if (formaLanc == "01" || formaLanc == "03" || formaLanc == "11" || formaLanc == "41" || formaLanc == "43" || formaLanc == "45" || formaLanc == "47")
-                                {
-                                    currentFormaPgto = "12";
-                                }
+                                currentFormaPgto = "3";
                                 break;
                             }
                         }
@@ -2399,37 +2541,40 @@ namespace ConvertFlow
 
         public static string NormalizeIdFormaPgto(string raw)
         {
-            if (string.IsNullOrEmpty(raw)) return "12";
+            if (string.IsNullOrEmpty(raw)) return "3";
             raw = raw.Trim();
-            if (raw.Length == 0) return "12";
+            if (raw.Length == 0) return "3";
 
             System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(raw, @"^\s*(\d+)");
             if (m.Success)
             {
-                return m.Groups[1].Value;
+                string num = m.Groups[1].Value;
+                if (num == "12") return "3"; // Usuário solicitou: o 26 que era pix e virou 12, muda para ser o retorno bancario (3)
+                return num;
             }
 
             string upper = raw.ToUpperInvariant();
 
-            // Depósito / TED / DOC / PIX -> 12
-            if (upper.Contains("PIX") ||
-                upper.Contains("DEP") ||
+            // Retorno Bancário / Boleto / Cobrança / Banco / PIX -> 3
+            if (upper.Contains("RETORNO") ||
+                upper.Contains("BANC") ||
+                upper.Contains("BOL") ||
+                upper.Contains("COB") ||
+                upper.Contains("TIT") ||
+                upper.Contains("PIX") ||
+                upper == "BA")
+            {
+                return "3";
+            }
+
+            // Depósito / TED / DOC -> 12
+            if (upper.Contains("DEP") ||
                 upper.Contains("TRANSF") ||
                 upper.Contains("TED") ||
                 upper.Contains("DOC") ||
                 upper == "DE")
             {
                 return "12";
-            }
-
-            // Boleto / Cobrança / Banco -> 3
-            if (upper.Contains("BOL") ||
-                upper.Contains("BANC") ||
-                upper.Contains("COB") ||
-                upper.Contains("TIT") ||
-                upper == "BA")
-            {
-                return "3";
             }
 
             // Dinheiro / Espécie / Caixa -> 1
@@ -2459,7 +2604,7 @@ namespace ConvertFlow
                 return "13";
             }
 
-            return "12";
+            return "3";
         }
 
         public static string GetFormaPgtoNome(string idOrName)
@@ -2467,15 +2612,15 @@ namespace ConvertFlow
             string id = NormalizeIdFormaPgto(idOrName);
             switch (id)
             {
+                case "3": return "Retorno Bancário";
                 case "12": return "DEPÓSITO";
-                case "3": return "BANCO";
                 case "1": return "DINHEIRO";
                 case "6": return "CHEQUE";
                 case "9":
                 case "14": return "CARTÃO CRÉDITO";
                 case "13":
                 case "2": return "CARTÃO DÉBITO";
-                default: return "DEPÓSITO";
+                default: return "Retorno Bancário";
             }
         }
 
@@ -2508,7 +2653,7 @@ namespace ConvertFlow
                     decimal vlrMulta = ParseBaixaDecimal(vlrMultaStr);
 
                     // Consulta automática ao banco TOTVS RM na tabela FLAN
-                    var flan = TotvsDbService.QueryLancamento(numDoc, clifor, vlrBx);
+                    var flan = TotvsDbService.QueryLancamento(numDoc, clifor, hist, vlrBx);
                     if (flan.Found)
                     {
                         if (!string.IsNullOrEmpty(flan.CodTipoDoc)) td = flan.CodTipoDoc;
@@ -2519,12 +2664,14 @@ namespace ConvertFlow
                     }
                     else
                     {
+                        if (!string.IsNullOrEmpty(flan.CodCfo)) clifor = flan.CodCfo;
                         if (string.IsNullOrEmpty(td) || td == "IGRA") td = fallbackTipoDoc;
                         if (string.IsNullOrEmpty(fil)) fil = fallbackFilial;
                         if (string.IsNullOrEmpty(cc)) cc = fallbackContaCaixa;
                     }
                     if (string.IsNullOrEmpty(fp)) fp = fallbackFormaPgto;
                     fp = NormalizeIdFormaPgto(fp);
+                    if (string.IsNullOrEmpty(fp) || fp == "12") fp = "3";
 
                     string lineBx = BuildBaixaLineDirect(
                         fil,
@@ -2810,18 +2957,22 @@ namespace ConvertFlow
             }
 
             // Realiza consulta automática ao banco TOTVS RM na tabela FLAN
-            var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, vlrReal);
+            var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, favorecido, vlrReal);
 
             string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
             string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
-            string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : (!string.IsNullOrEmpty(cpfCnpj) ? cpfCnpj : favorecido);
+            string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : (!string.IsNullOrEmpty(cpfCnpj) ? cpfCnpj : favorecido);
             string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
             string idLan = flan.Found ? flan.IdLan : "";
+            if (flan.Found && flan.ValorOriginal > 0m)
+            {
+                vlrReal = flan.ValorOriginal;
+            }
 
             string numFp = NormalizeIdFormaPgto(idFormaPgto);
-            if (segA.Length >= 20 && segA.Substring(17, 3) == "009")
+            if (string.IsNullOrEmpty(numFp) || numFp == "12")
             {
-                numFp = "12";
+                numFp = "3";
             }
 
             return BuildBaixaLine(
@@ -2837,7 +2988,7 @@ namespace ConvertFlow
                 finalContaCaixa,
                 favorecido,
                 numFp,
-                "DEPÓSITO",
+                GetFormaPgtoNome(numFp),
                 idLan
             );
         }
@@ -2900,7 +3051,7 @@ namespace ConvertFlow
 
             string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
             string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
-            string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : "";
+            string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : "";
             string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
             string idLan = flan.Found ? flan.IdLan : "";
 
@@ -2923,7 +3074,7 @@ namespace ConvertFlow
                 finalContaCaixa,
                 "",
                 numFp,
-                "BOLETO",
+                GetFormaPgtoNome(numFp),
                 idLan
             );
         }
@@ -2947,7 +3098,7 @@ namespace ConvertFlow
 
                     string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : codTipoDoc;
                     string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
-                    string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : cpfCnpj;
+                    string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : cpfCnpj;
                     string finalContaCaixa = (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : codContaCaixa;
                     string idLan = flan.Found ? flan.IdLan : "";
 
@@ -2970,7 +3121,7 @@ namespace ConvertFlow
                         finalContaCaixa,
                         "",
                         numFp,
-                        "COBRANÇA",
+                        GetFormaPgtoNome(numFp),
                         idLan
                     );
                     resultLines.Add(lineBx);
@@ -3059,14 +3210,18 @@ namespace ConvertFlow
                     rawDoc = r.ToString();
                 }
 
-                var flan = TotvsDbService.QueryLancamento(rawDoc, rawCpf, val);
+                var flan = TotvsDbService.QueryLancamento(rawDoc, rawCpf, rawDesc, val);
                 if (flan.Found)
                 {
                     if (string.IsNullOrEmpty(rowTd) && !string.IsNullOrEmpty(flan.CodTipoDoc)) rowTd = flan.CodTipoDoc;
                     if (string.IsNullOrEmpty(rawIdLan)) rawIdLan = flan.IdLan;
                     if (!string.IsNullOrEmpty(flan.CodFilial)) rowFil = flan.CodFilial;
                     if (!string.IsNullOrEmpty(flan.CodConta)) rowCc = flan.CodConta;
-                    if (!string.IsNullOrEmpty(flan.CodCfo) && string.IsNullOrEmpty(rawCpf)) rawCpf = flan.CodCfo;
+                    if (!string.IsNullOrEmpty(flan.CodCfo)) rawCpf = flan.CodCfo;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(flan.CodCfo)) rawCpf = flan.CodCfo;
                 }
 
                 if (string.IsNullOrEmpty(rowTd)) rowTd = codTipoDoc;
