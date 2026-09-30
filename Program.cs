@@ -3237,6 +3237,11 @@ namespace ConvertFlow
                     string cc = l.Substring(144, 10).Trim();
                     string vlrMultaStr = (l.Length >= 348) ? l.Substring(330, 18).Trim() : "0";
                     string hist = (l.Length >= 627) ? l.Substring(372, 255).Trim() : "";
+                    if (hist.StartsWith("Baixa Filial", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int idxFp = hist.IndexOf("Forma de Pagamento:", StringComparison.OrdinalIgnoreCase);
+                        if (idxFp >= 0) hist = hist.Substring(idxFp).Trim();
+                    }
                     string fp = (l.Length >= 937) ? l.Substring(930, 7).Trim() : (l.Length >= 931 ? l.Substring(930).Trim() : "");
                     string existingIdLan = (l.Length >= 852) ? l.Substring(752, 100).Trim() : "";
 
@@ -4170,7 +4175,7 @@ namespace ConvertFlow
             {
                 CultureInfo ptBr = new CultureInfo("pt-BR");
                 string vlrStr = vlrBaixado.ToString("N2", ptBr);
-                histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
+                histText = string.Format("Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
                     GetFormaPgtoNome(idFormaPgto),
                     vlrStr,
                     numDoc
@@ -4245,7 +4250,7 @@ namespace ConvertFlow
                 nomeFp = "Folha de Pagamento";
             }
             string docForHist = !string.IsNullOrEmpty(histDoc) ? histDoc : numDoc;
-            string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
+            string histText = string.Format("Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
                 nomeFp,
                 vlrStr,
                 docForHist
