@@ -13,6 +13,7 @@ using System.Xml;
 using System.Globalization;
 using System.Data;
 using System.Data.SqlClient;
+using System.Threading.Tasks;
 using Microsoft.Win32;
 
 namespace ConvertFlow
@@ -168,6 +169,21 @@ namespace ConvertFlow
             return builder.ConnectionString;
         }
 
+        public static SqlConnection OpenConnection()
+        {
+            if (!IsEnabled) return null;
+            try
+            {
+                SqlConnection conn = new SqlConnection(GetConnectionString());
+                conn.Open();
+                return conn;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         public static string TestConnection()
         {
             try
@@ -231,7 +247,7 @@ namespace ConvertFlow
             }
         }
 
-        public static CxaResult ResolveContaCaixa(string numBanco, string agencia, string conta, string nomeBancoHint = "")
+        public static CxaResult ResolveContaCaixa(string numBanco, string agencia, string conta, string nomeBancoHint = "", SqlConnection existingConn = null)
         {
             CxaResult res = new CxaResult();
             if (!IsEnabled) return res;
@@ -250,69 +266,81 @@ namespace ConvertFlow
                 if (cxaCache.ContainsKey(cacheKey)) return cxaCache[cacheKey];
             }
 
+            bool isTempConn = false;
+            SqlConnection conn = existingConn;
+            if (conn == null || conn.State != ConnectionState.Open)
+            {
+                try
+                {
+                    conn = new SqlConnection(GetConnectionString());
+                    conn.Open();
+                    isTempConn = true;
+                }
+                catch
+                {
+                    lock (cxaCache) { cxaCache[cacheKey] = res; }
+                    return res;
+                }
+            }
+
             try
             {
-                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                // 1. Tenta correspondência exata de Banco + Agência + Conta em DBO.FCXA
+                if (!string.IsNullOrEmpty(cleanBanco) && !string.IsNullOrEmpty(cleanContaNoZeros))
                 {
-                    conn.Open();
+                    string sqlExact = @"SELECT TOP 1 CODCXA, DESCRICAO, NUMBANCO 
+                                       FROM DBO.FCXA WITH (NOLOCK) 
+                                       WHERE (NUMBANCO = @Banco OR LTRIM(RTRIM(NUMBANCO)) = @BancoNoZeros)
+                                         AND (REPLACE(LTRIM(RTRIM(NUMAGENCIA)), '-', '') = @AgNoZeros 
+                                              OR NUMAGENCIA LIKE '%' + @AgNoZeros + '%' 
+                                              OR @AgNoZeros = '')
+                                         AND (REPLACE(LTRIM(RTRIM(NROCONTA)), '-', '') = @ContaNoZeros 
+                                              OR NROCONTA LIKE '%' + @ContaNoZeros + '%')
+                                       ORDER BY CASE WHEN DESCRICAO LIKE '%CONTA CAIXA%' THEN 0 ELSE 1 END, CODCXA ASC";
 
-                    // 1. Tenta correspondência exata de Banco + Agência + Conta em DBO.FCXA
-                    if (!string.IsNullOrEmpty(cleanBanco) && !string.IsNullOrEmpty(cleanContaNoZeros))
+                    using (SqlCommand cmd = new SqlCommand(sqlExact, conn))
                     {
-                        string sqlExact = @"SELECT TOP 1 CODCXA, DESCRICAO, NUMBANCO 
-                                           FROM DBO.FCXA WITH (NOLOCK) 
-                                           WHERE (NUMBANCO = @Banco OR LTRIM(RTRIM(NUMBANCO)) = @BancoNoZeros)
-                                             AND (REPLACE(LTRIM(RTRIM(NUMAGENCIA)), '-', '') = @AgNoZeros 
-                                                  OR NUMAGENCIA LIKE '%' + @AgNoZeros + '%' 
-                                                  OR @AgNoZeros = '')
-                                             AND (REPLACE(LTRIM(RTRIM(NROCONTA)), '-', '') = @ContaNoZeros 
-                                                  OR NROCONTA LIKE '%' + @ContaNoZeros + '%')
-                                           ORDER BY CASE WHEN DESCRICAO LIKE '%CONTA CAIXA%' THEN 0 ELSE 1 END, CODCXA ASC";
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Banco", cleanBanco);
+                        cmd.Parameters.AddWithValue("@BancoNoZeros", cleanBancoNoZeros.Length > 0 ? cleanBancoNoZeros : cleanBanco);
+                        cmd.Parameters.AddWithValue("@AgNoZeros", cleanAgNoZeros);
+                        cmd.Parameters.AddWithValue("@ContaNoZeros", cleanContaNoZeros);
 
-                        using (SqlCommand cmd = new SqlCommand(sqlExact, conn))
+                        using (SqlDataReader reader = cmd.ExecuteReader())
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Banco", cleanBanco);
-                            cmd.Parameters.AddWithValue("@BancoNoZeros", cleanBancoNoZeros.Length > 0 ? cleanBancoNoZeros : cleanBanco);
-                            cmd.Parameters.AddWithValue("@AgNoZeros", cleanAgNoZeros);
-                            cmd.Parameters.AddWithValue("@ContaNoZeros", cleanContaNoZeros);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            if (reader.Read())
                             {
-                                if (reader.Read())
-                                {
-                                    res.CodCxa = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.Descricao = reader["DESCRICAO"] != DBNull.Value ? reader["DESCRICAO"].ToString().Trim() : "";
-                                    res.NomeBanco = ExtractNomeBanco(res.Descricao, cleanNomeHint, cleanBanco);
-                                }
+                                res.CodCxa = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.Descricao = reader["DESCRICAO"] != DBNull.Value ? reader["DESCRICAO"].ToString().Trim() : "";
+                                res.NomeBanco = ExtractNomeBanco(res.Descricao, cleanNomeHint, cleanBanco);
                             }
                         }
                     }
+                }
 
-                    // 2. Se não encontrou pela conta exata, busca apenas por Banco ou Nome em FCXA
-                    if (string.IsNullOrEmpty(res.CodCxa) && (!string.IsNullOrEmpty(cleanBanco) || !string.IsNullOrEmpty(cleanNomeHint)))
+                // 2. Se não encontrou pela conta exata, busca apenas por Banco ou Nome em FCXA
+                if (string.IsNullOrEmpty(res.CodCxa) && (!string.IsNullOrEmpty(cleanBanco) || !string.IsNullOrEmpty(cleanNomeHint)))
+                {
+                    string sqlBank = @"SELECT TOP 1 CODCXA, DESCRICAO, NUMBANCO 
+                                      FROM DBO.FCXA WITH (NOLOCK) 
+                                      WHERE (NUMBANCO = @Banco OR LTRIM(RTRIM(NUMBANCO)) = @BancoNoZeros)
+                                         OR (@NomeHint <> '' AND UPPER(DESCRICAO) LIKE '%' + @NomeHint + '%')
+                                      ORDER BY CASE WHEN DESCRICAO LIKE '%CONTA CAIXA%' THEN 0 ELSE 1 END, CODCXA ASC";
+
+                    using (SqlCommand cmd = new SqlCommand(sqlBank, conn))
                     {
-                        string sqlBank = @"SELECT TOP 1 CODCXA, DESCRICAO, NUMBANCO 
-                                          FROM DBO.FCXA WITH (NOLOCK) 
-                                          WHERE (NUMBANCO = @Banco OR LTRIM(RTRIM(NUMBANCO)) = @BancoNoZeros)
-                                             OR (@NomeHint <> '' AND UPPER(DESCRICAO) LIKE '%' + @NomeHint + '%')
-                                          ORDER BY CASE WHEN DESCRICAO LIKE '%CONTA CAIXA%' THEN 0 ELSE 1 END, CODCXA ASC";
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Banco", cleanBanco);
+                        cmd.Parameters.AddWithValue("@BancoNoZeros", cleanBancoNoZeros.Length > 0 ? cleanBancoNoZeros : cleanBanco);
+                        cmd.Parameters.AddWithValue("@NomeHint", cleanNomeHint);
 
-                        using (SqlCommand cmd = new SqlCommand(sqlBank, conn))
+                        using (SqlDataReader reader = cmd.ExecuteReader())
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Banco", cleanBanco);
-                            cmd.Parameters.AddWithValue("@BancoNoZeros", cleanBancoNoZeros.Length > 0 ? cleanBancoNoZeros : cleanBanco);
-                            cmd.Parameters.AddWithValue("@NomeHint", cleanNomeHint);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            if (reader.Read())
                             {
-                                if (reader.Read())
-                                {
-                                    res.CodCxa = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.Descricao = reader["DESCRICAO"] != DBNull.Value ? reader["DESCRICAO"].ToString().Trim() : "";
-                                    res.NomeBanco = ExtractNomeBanco(res.Descricao, cleanNomeHint, cleanBanco);
-                                }
+                                res.CodCxa = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.Descricao = reader["DESCRICAO"] != DBNull.Value ? reader["DESCRICAO"].ToString().Trim() : "";
+                                res.NomeBanco = ExtractNomeBanco(res.Descricao, cleanNomeHint, cleanBanco);
                             }
                         }
                     }
@@ -321,6 +349,13 @@ namespace ConvertFlow
             catch
             {
                 // Silencioso
+            }
+            finally
+            {
+                if (isTempConn && conn != null)
+                {
+                    try { conn.Dispose(); } catch { }
+                }
             }
 
             if (string.IsNullOrEmpty(res.NomeBanco))
@@ -335,7 +370,12 @@ namespace ConvertFlow
             return res;
         }
 
-        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, string favorecido, decimal valor)
+        public static CxaResult ResolveContaCaixa(string numBanco, string agencia, string conta, string nomeBancoHint = "")
+        {
+            return ResolveContaCaixa(numBanco, agencia, conta, nomeBancoHint, null);
+        }
+
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, string favorecido, decimal valor, SqlConnection existingConn = null)
         {
             FlanResult res = new FlanResult();
             res.Found = false;
@@ -354,208 +394,252 @@ namespace ConvertFlow
                 if (cache.ContainsKey(cacheKey)) return cache[cacheKey];
             }
 
+            // Identifica se há um IDLAN numérico explícito ou derivado (ex: nosso número CNAB "11961392" -> 961392)
+            int candidateIdLan = 0;
+            if (cleanDoc.StartsWith("11") && cleanDoc.Length == 8 && int.TryParse(cleanDoc.Substring(2), out candidateIdLan))
+            {
+            }
+            else if (cleanDocNoZeros.Length >= 4 && cleanDocNoZeros.Length <= 10 && IsAllDigits(cleanDocNoZeros) && int.TryParse(cleanDocNoZeros, out candidateIdLan))
+            {
+            }
+
+            if (candidateIdLan > 0)
+            {
+                string idKey = candidateIdLan.ToString();
+                lock (cache)
+                {
+                    if (cache.ContainsKey(idKey) && cache[idKey].Found)
+                    {
+                        var cachedFlan = cache[idKey];
+                        lock (cache) { cache[cacheKey] = cachedFlan; }
+                        return cachedFlan;
+                    }
+                }
+            }
+
+            bool isTempConn = false;
+            SqlConnection conn = existingConn;
+            if (conn == null || conn.State != ConnectionState.Open)
+            {
+                try
+                {
+                    conn = new SqlConnection(GetConnectionString());
+                    conn.Open();
+                    isTempConn = true;
+                }
+                catch
+                {
+                    lock (cache) { cache[cacheKey] = res; }
+                    return res;
+                }
+            }
+
             try
             {
-                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                // 0. Busca direta e instantânea por IDLAN na Primary Key (Clustered Index Seek < 1ms)
+                if (candidateIdLan > 0)
                 {
-                    conn.Open();
+                    string sqlPk = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                     FROM DBO.FLAN WITH (NOLOCK) 
+                                     WHERE IDLAN = @IdLan";
 
-                    string resolvedCfo = null;
-                    if (cleanCpf.Length >= 2 && (cleanCpf.StartsWith("F") || cleanCpf.StartsWith("C") || cleanCpf.StartsWith("A") || cleanCpf.StartsWith("L") || cleanCpf.StartsWith("M")))
+                    using (SqlCommand cmd = new SqlCommand(sqlPk, conn))
                     {
-                        resolvedCfo = cleanCpf;
-                    }
-                    else if (cleanCpf.Length >= 11)
-                    {
-                        string sqlCfo = @"SELECT TOP 1 CODCFO 
-                                          FROM DBO.FCFO WITH (NOLOCK) 
-                                          WHERE REPLACE(REPLACE(REPLACE(CGCCFO, '.', ''), '-', ''), '/', '') = @Cpf
-                                             OR REPLACE(REPLACE(REPLACE(CGCCFO, '.', ''), '-', ''), '/', '') = @CpfNoZeros";
-
-                        using (SqlCommand cmd = new SqlCommand(sqlCfo, conn))
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@IdLan", candidateIdLan);
+                        using (SqlDataReader reader = cmd.ExecuteReader())
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
-                            cmd.Parameters.AddWithValue("@CpfNoZeros", cleanCpfNoZeros.Length > 0 ? cleanCpfNoZeros : cleanCpf);
-                            object obj = cmd.ExecuteScalar();
-                            if (obj != null && obj != DBNull.Value)
+                            if (reader.Read())
                             {
-                                resolvedCfo = obj.ToString().Trim();
+                                res.Found = true;
+                                res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
+                                res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
                             }
                         }
                     }
 
-                    // Se não encontrou por CPF e tem favorecido, busca por Nome em FCFO
-                    if (string.IsNullOrEmpty(resolvedCfo) && cleanFav.Length >= 4)
+                    if (res.Found)
                     {
-                        string favPrefix = cleanFav.Substring(0, Math.Min(15, cleanFav.Length)).Trim();
-                        string sqlFav = @"SELECT TOP 1 CODCFO 
-                                          FROM DBO.FCFO WITH (NOLOCK) 
-                                          WHERE NOME LIKE @FavPrefix + '%'";
-
-                        using (SqlCommand cmd = new SqlCommand(sqlFav, conn))
+                        lock (cache)
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@FavPrefix", favPrefix);
-                            object obj = cmd.ExecuteScalar();
-                            if (obj != null && obj != DBNull.Value)
+                            cache[cacheKey] = res;
+                            if (!string.IsNullOrEmpty(res.IdLan)) cache[res.IdLan] = res;
+                        }
+                        return res;
+                    }
+                }
+
+                // Resolução de CODCFO se necessário
+                string resolvedCfo = null;
+                if (cleanCpf.Length >= 2 && (cleanCpf.StartsWith("F") || cleanCpf.StartsWith("C") || cleanCpf.StartsWith("A") || cleanCpf.StartsWith("L") || cleanCpf.StartsWith("M")))
+                {
+                    resolvedCfo = cleanCpf;
+                }
+                else if (cleanCpf.Length >= 11)
+                {
+                    string cpfFmt = cleanCpf;
+                    long cVal;
+                    if (cleanCpf.Length == 11 && long.TryParse(cleanCpf, out cVal))
+                    {
+                        cpfFmt = string.Format("{0:000\\.000\\.000\\-00}", cVal);
+                    }
+                    else if (cleanCpf.Length == 14 && long.TryParse(cleanCpf, out cVal))
+                    {
+                        cpfFmt = string.Format("{0:00\\.000\\.000\\/0000\\-00}", cVal);
+                    }
+
+                    string sqlCfo = @"SELECT TOP 1 CODCFO 
+                                      FROM DBO.FCFO WITH (NOLOCK) 
+                                      WHERE CGCCFO = @Cpf OR CGCCFO = @CpfFmt OR CGCCFO = @CpfNoZeros";
+
+                    using (SqlCommand cmd = new SqlCommand(sqlCfo, conn))
+                    {
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
+                        cmd.Parameters.AddWithValue("@CpfFmt", cpfFmt);
+                        cmd.Parameters.AddWithValue("@CpfNoZeros", cleanCpfNoZeros.Length > 0 ? cleanCpfNoZeros : cleanCpf);
+                        object obj = cmd.ExecuteScalar();
+                        if (obj != null && obj != DBNull.Value)
+                        {
+                            resolvedCfo = obj.ToString().Trim();
+                        }
+                    }
+                }
+
+                // Se não encontrou por CPF e tem favorecido, busca por Nome em FCFO
+                if (string.IsNullOrEmpty(resolvedCfo) && cleanFav.Length >= 4)
+                {
+                    string favPrefix = cleanFav.Substring(0, Math.Min(15, cleanFav.Length)).Trim();
+                    string sqlFav = @"SELECT TOP 1 CODCFO 
+                                      FROM DBO.FCFO WITH (NOLOCK) 
+                                      WHERE NOME LIKE @FavPrefix + '%'";
+
+                    using (SqlCommand cmd = new SqlCommand(sqlFav, conn))
+                    {
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@FavPrefix", favPrefix);
+                        object obj = cmd.ExecuteScalar();
+                        if (obj != null && obj != DBNull.Value)
+                        {
+                            resolvedCfo = obj.ToString().Trim();
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(resolvedCfo))
+                {
+                    res.CodCfo = resolvedCfo;
+                }
+
+                // 1. Se tem resolvedCfo e documento, busca com máxima precisão no cliente/fornecedor (STATUSLAN 0, 1 ou 4)
+                if (!string.IsNullOrEmpty(resolvedCfo) && !string.IsNullOrEmpty(cleanDoc))
+                {
+                    string sqlDocCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                         FROM DBO.FLAN WITH (NOLOCK) 
+                                         WHERE CODCFO = @Cfo
+                                           AND (STATUSLAN IN (0, 1, 4))
+                                           AND (NUMERODOCUMENTO = @Doc 
+                                                OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                                OR IPTE = @Doc
+                                                OR SEGUNDONUMERO = @Doc)
+                                         ORDER BY CASE WHEN STATUSLAN IN (0, 4) THEN 0 ELSE 1 END, IDLAN DESC";
+
+                    using (SqlCommand cmd = new SqlCommand(sqlDocCfo, conn))
+                    {
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                        cmd.Parameters.AddWithValue("@Doc", cleanDoc);
+                        cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
+
+                        using (SqlDataReader reader = cmd.ExecuteReader())
+                        {
+                            if (reader.Read())
                             {
-                                resolvedCfo = obj.ToString().Trim();
+                                res.Found = true;
+                                res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
                             }
                         }
                     }
+                }
 
-                    if (!string.IsNullOrEmpty(resolvedCfo))
-                    {
-                        res.CodCfo = resolvedCfo;
-                    }
-
-                    // 1. Se tem resolvedCfo e documento, busca com máxima precisão no cliente/fornecedor (Prioriza STATUSLAN = 0)
-                    if (!string.IsNullOrEmpty(resolvedCfo) && !string.IsNullOrEmpty(cleanDoc))
-                    {
-                        string docTail = (cleanDocNoZeros.Length >= 6) ? cleanDocNoZeros.Substring(cleanDocNoZeros.Length - 6) : cleanDocNoZeros;
-                        string sqlDocCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
-                                             FROM DBO.FLAN WITH (NOLOCK) 
-                                             WHERE CODCFO = @Cfo
-                                               AND (STATUSLAN = 0 OR STATUSLAN = 1)
-                                               AND (NUMERODOCUMENTO = @Doc 
-                                                    OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
-                                                    OR IPTE = @Doc
-                                                    OR SEGUNDONUMERO = @Doc
-                                                    OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
-                                                    OR CAST(IDLAN AS VARCHAR(20)) = @DocTail)
-                                             ORDER BY STATUSLAN ASC, IDLAN DESC";
-
-                        using (SqlCommand cmd = new SqlCommand(sqlDocCfo, conn))
-                        {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
-                            cmd.Parameters.AddWithValue("@Doc", cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocTail", docTail.Length > 0 ? docTail : cleanDoc);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
-                            {
-                                if (reader.Read())
-                                {
-                                    res.Found = true;
-                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
-                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
-                            }
-                        }
-                    }
-
-                    // 2. Se tem resolvedCfo e valor (e não achou por doc), busca no cliente por valor (Prioriza STATUSLAN = 0)
-                    if (!res.Found && !string.IsNullOrEmpty(resolvedCfo) && valor > 0m)
-                    {
-                        string sqlFlanCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
-                                              FROM DBO.FLAN WITH (NOLOCK) 
-                                              WHERE CODCFO = @Cfo 
-                                                AND (STATUSLAN = 0 OR STATUSLAN = 1)
-                                                AND ABS(VALORORIGINAL - @Valor) < 0.05
-                                              ORDER BY STATUSLAN ASC, IDLAN DESC";
-
-                        using (SqlCommand cmd = new SqlCommand(sqlFlanCfo, conn))
-                        {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
-                            cmd.Parameters.AddWithValue("@Valor", valor);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
-                            {
-                                if (reader.Read())
-                                {
-                                    res.Found = true;
-                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
-                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
-                            }
-                        }
-                    }
-
-                    // 3. Busca global por Documento / IDLAN / Nosso Número (Apenas se documento for longo/específico >= 6 dígitos)
-                    if (!res.Found && !string.IsNullOrEmpty(cleanDoc) && cleanDocNoZeros.Length >= 6)
-                    {
-                        string docTail = (cleanDocNoZeros.Length >= 6) ? cleanDocNoZeros.Substring(cleanDocNoZeros.Length - 6) : cleanDocNoZeros;
-                        string sqlDoc = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                // 2. Se tem resolvedCfo e valor (e não achou por doc), busca no cliente por valor (STATUSLAN 0, 1 ou 4)
+                if (!res.Found && !string.IsNullOrEmpty(resolvedCfo) && valor > 0m)
+                {
+                    string sqlFlanCfo = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
                                           FROM DBO.FLAN WITH (NOLOCK) 
-                                          WHERE (STATUSLAN = 0 OR STATUSLAN = 1)
-                                            AND (NUMERODOCUMENTO = @Doc 
-                                                 OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
-                                                 OR IPTE = @Doc
-                                                 OR SEGUNDONUMERO = @Doc
-                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocClean
-                                                 OR CAST(IDLAN AS VARCHAR(20)) = @DocTail
-                                                 OR (@DocClean LIKE '%' + CAST(IDLAN AS VARCHAR(20)) AND IDLAN >= 100000))
-                                          ORDER BY STATUSLAN ASC, IDLAN DESC";
+                                          WHERE CODCFO = @Cfo 
+                                            AND (STATUSLAN IN (0, 1, 4))
+                                            AND ABS(VALORORIGINAL - @Valor) < 0.05
+                                          ORDER BY CASE WHEN STATUSLAN IN (0, 4) THEN 0 ELSE 1 END, IDLAN DESC";
 
-                        using (SqlCommand cmd = new SqlCommand(sqlDoc, conn))
+                    using (SqlCommand cmd = new SqlCommand(sqlFlanCfo, conn))
+                    {
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Cfo", resolvedCfo);
+                        cmd.Parameters.AddWithValue("@Valor", valor);
+
+                        using (SqlDataReader reader = cmd.ExecuteReader())
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Doc", cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
-                            cmd.Parameters.AddWithValue("@DocTail", docTail.Length > 0 ? docTail : cleanDoc);
-
-                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            if (reader.Read())
                             {
-                                if (reader.Read())
-                                {
-                                    res.Found = true;
-                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
+                                res.Found = true;
+                                res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : resolvedCfo;
+                                res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
                             }
                         }
                     }
+                }
 
-                    // 4. Se ainda não encontrou, tenta busca LIKE por documento (Prioriza STATUSLAN = 0)
-                    if (!res.Found && cleanDocNoZeros.Length >= 6)
+                // 3. Busca por Documento nas colunas indexadas (STATUSLAN 0, 1 ou 4)
+                if (!res.Found && !string.IsNullOrEmpty(cleanDoc) && cleanDocNoZeros.Length >= 4)
+                {
+                    string sqlDoc = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
+                                      FROM DBO.FLAN WITH (NOLOCK) 
+                                      WHERE (STATUSLAN IN (0, 1, 4))
+                                        AND (NUMERODOCUMENTO = @Doc 
+                                             OR RTRIM(LTRIM(NUMERODOCUMENTO)) = @DocClean
+                                             OR IPTE = @Doc
+                                             OR SEGUNDONUMERO = @Doc)
+                                      ORDER BY CASE WHEN STATUSLAN IN (0, 4) THEN 0 ELSE 1 END, IDLAN DESC";
+
+                    using (SqlCommand cmd = new SqlCommand(sqlDoc, conn))
                     {
-                        string sqlLike = @"SELECT TOP 1 IDLAN, CODTDO, CODFILIAL, CODCFO, CODCXA, VALORORIGINAL, NUMERODOCUMENTO, IDFORMAPAGTO 
-                                           FROM DBO.FLAN WITH (NOLOCK) 
-                                           WHERE (STATUSLAN = 0 OR STATUSLAN = 1)
-                                             AND (NUMERODOCUMENTO LIKE '%' + @DocClean
-                                                  OR IPTE LIKE '%' + @DocClean
-                                                  OR SEGUNDONUMERO LIKE '%' + @DocClean)
-                                           ORDER BY STATUSLAN ASC, IDLAN DESC";
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Doc", cleanDoc);
+                        cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros.Length > 0 ? cleanDocNoZeros : cleanDoc);
 
-                        using (SqlCommand cmd = new SqlCommand(sqlLike, conn))
+                        using (SqlDataReader reader = cmd.ExecuteReader())
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@DocClean", cleanDocNoZeros);
-                            using (SqlDataReader reader = cmd.ExecuteReader())
+                            if (reader.Read())
                             {
-                                if (reader.Read())
-                                {
-                                    res.Found = true;
-                                    res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
-                                    res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
-                                    res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
-                                    res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
-                                    res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
-                                    res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
-                                    res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
-                                    if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
-                                }
+                                res.Found = true;
+                                res.IdLan = reader["IDLAN"] != DBNull.Value ? reader["IDLAN"].ToString().Trim() : "";
+                                res.CodTipoDoc = reader["CODTDO"] != DBNull.Value ? reader["CODTDO"].ToString().Trim() : "";
+                                res.CodFilial = reader["CODFILIAL"] != DBNull.Value ? reader["CODFILIAL"].ToString().Trim() : "";
+                                res.CodCfo = reader["CODCFO"] != DBNull.Value ? reader["CODCFO"].ToString().Trim() : "";
+                                res.CodConta = reader["CODCXA"] != DBNull.Value ? reader["CODCXA"].ToString().Trim() : "";
+                                res.NumeroDocumento = reader["NUMERODOCUMENTO"] != DBNull.Value ? reader["NUMERODOCUMENTO"].ToString().Trim() : "";
+                                res.IdFormaPagto = reader["IDFORMAPAGTO"] != DBNull.Value ? reader["IDFORMAPAGTO"].ToString().Trim() : "";
+                                if (reader["VALORORIGINAL"] != DBNull.Value) res.ValorOriginal = Convert.ToDecimal(reader["VALORORIGINAL"]);
                             }
                         }
                     }
@@ -563,22 +647,43 @@ namespace ConvertFlow
             }
             catch
             {
-                // Falha silenciosa caso o banco esteja indisponível
+                // Falha silenciosa
+            }
+            finally
+            {
+                if (isTempConn && conn != null)
+                {
+                    try { conn.Dispose(); } catch { }
+                }
             }
 
             lock (cache)
             {
                 cache[cacheKey] = res;
+                if (res.Found && !string.IsNullOrEmpty(res.IdLan))
+                {
+                    cache[res.IdLan] = res;
+                }
             }
             return res;
         }
 
-        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor, SqlConnection existingConn)
         {
-            return QueryLancamento(docNum, cpfCnpj, "", valor);
+            return QueryLancamento(docNum, cpfCnpj, "", valor, existingConn);
         }
 
-        public static string QueryFuncionarioByChapa(string docNum, string cpf = "")
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, decimal valor)
+        {
+            return QueryLancamento(docNum, cpfCnpj, "", valor, null);
+        }
+
+        public static FlanResult QueryLancamento(string docNum, string cpfCnpj, string favorecido, decimal valor)
+        {
+            return QueryLancamento(docNum, cpfCnpj, favorecido, valor, null);
+        }
+
+        public static string QueryFuncionarioByChapa(string docNum, string cpf = "", SqlConnection existingConn = null)
         {
             if (!IsEnabled) return null;
             if (string.IsNullOrEmpty(docNum) && string.IsNullOrEmpty(cpf)) return null;
@@ -607,47 +712,61 @@ namespace ConvertFlow
             }
 
             string nomeEncontrado = null;
+            bool isTempConn = false;
+            SqlConnection conn = existingConn;
+            if (conn == null || conn.State != ConnectionState.Open)
+            {
+                try
+                {
+                    conn = new SqlConnection(GetConnectionString());
+                    conn.Open();
+                    isTempConn = true;
+                }
+                catch
+                {
+                    lock (funcCache) { funcCache[cacheKey] = null; }
+                    return null;
+                }
+            }
 
             try
             {
-                using (SqlConnection conn = new SqlConnection(GetConnectionString()))
+                // 1. Busca por CHAPA na tabela PFUNC
+                if (!string.IsNullOrEmpty(chapa))
                 {
-                    conn.Open();
-
-                    // 1. Busca por CHAPA na tabela PFUNC
-                    if (!string.IsNullOrEmpty(chapa))
+                    string sqlChapa = "SELECT TOP 1 NOME FROM DBO.PFUNC WITH (NOLOCK) WHERE CHAPA = @Chapa";
+                    using (SqlCommand cmd = new SqlCommand(sqlChapa, conn))
                     {
-                        string sqlChapa = "SELECT TOP 1 NOME FROM DBO.PFUNC WITH (NOLOCK) WHERE CHAPA = @Chapa";
-                        using (SqlCommand cmd = new SqlCommand(sqlChapa, conn))
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Chapa", chapa);
+                        object obj = cmd.ExecuteScalar();
+                        if (obj != null && obj != DBNull.Value)
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Chapa", chapa);
-                            object obj = cmd.ExecuteScalar();
-                            if (obj != null && obj != DBNull.Value)
-                            {
-                                string val = obj.ToString().Trim();
-                                if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
-                            }
+                            string val = obj.ToString().Trim();
+                            if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
                         }
                     }
+                }
 
-                    // 2. Se não encontrou por CHAPA e tem CPF, busca por CPF via PPESSOA
-                    if (string.IsNullOrEmpty(nomeEncontrado) && cleanCpf.Length >= 11)
+                // 2. Se não encontrou por CHAPA e tem CPF, busca por CPF via PPESSOA (Usa busca indexada direta em CPF)
+                if (string.IsNullOrEmpty(nomeEncontrado) && cleanCpf.Length == 11)
+                {
+                    long cpfLong;
+                    string cpfFmt = (long.TryParse(cleanCpf, out cpfLong)) ? string.Format("{0:000\\.000\\.000\\-00}", cpfLong) : cleanCpf;
+                    string sqlCpf = @"SELECT TOP 1 F.NOME 
+                                      FROM DBO.PFUNC F WITH (NOLOCK) 
+                                      INNER JOIN DBO.PPESSOA P WITH (NOLOCK) ON F.CODPESSOA = P.CODIGO 
+                                      WHERE P.CPF = @Cpf OR P.CPF = @CpfFmt";
+                    using (SqlCommand cmd = new SqlCommand(sqlCpf, conn))
                     {
-                        string sqlCpf = @"SELECT TOP 1 F.NOME 
-                                          FROM DBO.PFUNC F WITH (NOLOCK) 
-                                          INNER JOIN DBO.PPESSOA P WITH (NOLOCK) ON F.CODPESSOA = P.CODIGO 
-                                          WHERE REPLACE(REPLACE(REPLACE(P.CPF, '.', ''), '-', ''), '/', '') = @Cpf";
-                        using (SqlCommand cmd = new SqlCommand(sqlCpf, conn))
+                        cmd.CommandTimeout = 4;
+                        cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
+                        cmd.Parameters.AddWithValue("@CpfFmt", cpfFmt);
+                        object obj = cmd.ExecuteScalar();
+                        if (obj != null && obj != DBNull.Value)
                         {
-                            cmd.CommandTimeout = 4;
-                            cmd.Parameters.AddWithValue("@Cpf", cleanCpf);
-                            object obj = cmd.ExecuteScalar();
-                            if (obj != null && obj != DBNull.Value)
-                            {
-                                string val = obj.ToString().Trim();
-                                if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
-                            }
+                            string val = obj.ToString().Trim();
+                            if (!string.IsNullOrEmpty(val)) nomeEncontrado = val;
                         }
                     }
                 }
@@ -656,6 +775,13 @@ namespace ConvertFlow
             {
                 // Silencioso
             }
+            finally
+            {
+                if (isTempConn && conn != null)
+                {
+                    try { conn.Dispose(); } catch { }
+                }
+            }
 
             lock (funcCache)
             {
@@ -663,6 +789,11 @@ namespace ConvertFlow
             }
 
             return nomeEncontrado;
+        }
+
+        public static string QueryFuncionarioByChapa(string docNum, string cpf = "")
+        {
+            return QueryFuncionarioByChapa(docNum, cpf, null);
         }
 
         public static bool IsAllDigits(string s)
@@ -983,7 +1114,7 @@ namespace ConvertFlow
         private string currentFilial = "0002";
         private string currentTipoDoc = "SALP";
         private string currentContaCaixa = "30";
-        private string currentFormaPgto = "3";
+        private string currentFormaPgto = "166";
         private Button convertButton;
         private Border resultPanel;
         private TextBlock resultPathText;
@@ -1509,7 +1640,7 @@ namespace ConvertFlow
                 sb.AppendLine("FILIAL=" + (currentFilial ?? "0002"));
                 sb.AppendLine("TIPODOC=" + (currentTipoDoc ?? "SALP"));
                 sb.AppendLine("CONTACAIXA=" + (currentContaCaixa ?? "30"));
-                sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "3"));
+                sb.AppendLine("FORMAPGTO=" + CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto ?? "166"));
                 sb.AppendLine("DB_SERVER=" + (TotvsDbService.Server ?? "172.20.11.108"));
                 sb.AppendLine("DB_DATABASE=" + (TotvsDbService.Database ?? "CORPORERM"));
                 sb.AppendLine("DB_USE_INTEGRATED=" + (TotvsDbService.UseIntegratedAuth ? "1" : "0"));
@@ -1750,7 +1881,7 @@ namespace ConvertFlow
                                 {
                                     currentContaCaixa = cxa.CodCxa;
                                 }
-                                currentFormaPgto = "3";
+                                currentFormaPgto = "166";
                                 currentTipoDoc = "SALP";
                                 break;
                             }
@@ -1765,13 +1896,13 @@ namespace ConvertFlow
                                 {
                                     currentContaCaixa = cxa.CodCxa;
                                 }
-                                currentFormaPgto = "3";
+                                currentFormaPgto = "166";
                                 currentTipoDoc = "SALP";
                                 break;
                             }
                             else if (l.Length >= 240 && l.Length > 13 && l.Substring(7, 1) == "1")
                             {
-                                currentFormaPgto = "3";
+                                currentFormaPgto = "166";
                                 currentTipoDoc = "SALP";
                                 break;
                             }
@@ -1838,7 +1969,7 @@ namespace ConvertFlow
             resultPanel.Visibility = Visibility.Collapsed;
         }
 
-        private void ConvertButton_Click(object sender, RoutedEventArgs e)
+        private async void ConvertButton_Click(object sender, RoutedEventArgs e)
         {
             if (string.IsNullOrEmpty(selectedFilePath) || !File.Exists(selectedFilePath)) return;
 
@@ -1846,6 +1977,7 @@ namespace ConvertFlow
             {
                 convertButton.IsEnabled = false;
                 convertButton.Content = "Convertendo...";
+                convertButton.Cursor = Cursors.Wait;
 
                 SaveTotvsConfig();
 
@@ -1857,171 +1989,15 @@ namespace ConvertFlow
                 string contaCaixa = string.IsNullOrEmpty(currentContaCaixa) || currentContaCaixa == "1" ? "30" : currentContaCaixa;
                 string formaPgto = CnabToBaixaConverter.NormalizeIdFormaPgto(currentFormaPgto);
 
-                string baseName = Path.GetFileNameWithoutExtension(selectedFilePath);
-                string timeTag = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                string outExt = targetFormat.ToLower();
-                string outputFileName;
-                if (targetFormat == "BAIXA")
-                {
-                    outputFileName = string.Format("BAIXA_{0}_{1}.txt", baseName, timeTag);
-                }
-                else
-                {
-                    outputFileName = string.Format("{0}_convertido_{1}.{2}", baseName, timeTag, outExt);
-                }
-                string outputPath = Path.Combine(documentsDir, outputFileName);
+                string srcPath = selectedFilePath;
+                string fmt = targetFormat;
+                string ext = detectedExtension;
+                string docDir = documentsDir;
 
-                if (targetFormat == "BAIXA")
+                string outputPath = await Task.Run(() =>
                 {
-                    string baixaContent = "";
-                    if (detectedExtension == "xlsx" || detectedExtension == "xls")
-                    {
-                        var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
-                        baixaContent = CnabToBaixaConverter.ConvertTableToBaixa(rows, filial, tipoDoc, contaCaixa, formaPgto);
-                    }
-                    else
-                    {
-                        string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                        baixaContent = CnabToBaixaConverter.ConvertToBaixa(rawText, filial, tipoDoc, contaCaixa, formaPgto);
-                    }
-                    File.WriteAllText(outputPath, baixaContent, Encoding.GetEncoding(1252));
-                }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "OFX")
-                {
-                    string csvContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csvContent, banco, agencia, conta);
-                    File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
-                }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "XLSX")
-                {
-                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    List<string> lines = new List<string>();
-                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
-
-                    List<List<string>> rows;
-                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
-                    {
-                        rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
-                    }
-                    else
-                    {
-                        char delim = CsvToOfxConverter.DetectDelimiter(rawText);
-                        rows = CsvToOfxConverter.ParseCsv(rawText, delim);
-                    }
-                    SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
-                }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "CSV")
-                {
-                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    List<string> lines = new List<string>();
-                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
-
-                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
-                    {
-                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
-                        string csvOut = SimpleXlsxReader.RowsToCsv(rows, ";");
-                        File.WriteAllText(outputPath, csvOut, new UTF8Encoding(true));
-                    }
-                    else
-                    {
-                        File.WriteAllText(outputPath, rawText, new UTF8Encoding(true));
-                    }
-                }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "TXT")
-                {
-                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    List<string> lines = new List<string>();
-                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
-
-                    string txt;
-                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
-                    {
-                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
-                        string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
-                        txt = TableFormatter.CsvToAlignedTxt(csvTemp);
-                    }
-                    else
-                    {
-                        txt = TableFormatter.CsvToAlignedTxt(rawText);
-                    }
-                    File.WriteAllText(outputPath, txt, Encoding.UTF8);
-                }
-                else if ((detectedExtension == "csv" || detectedExtension == "txt" || detectedExtension == "ret" || detectedExtension == "rem") && targetFormat == "PDF")
-                {
-                    string rawText = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    List<string> lines = new List<string>();
-                    foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
-
-                    if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
-                    {
-                        var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
-                        string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
-                        SimplePdfWriter.WriteCsvToPdf(csvTemp, outputPath, baseName);
-                    }
-                    else
-                    {
-                        SimplePdfWriter.WriteCsvToPdf(rawText, outputPath, baseName);
-                    }
-                }
-                else if (detectedExtension == "ofx" && targetFormat == "CSV")
-                {
-                    string ofxContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string csv = OfxParser.ToCsv(ofxContent);
-                    File.WriteAllText(outputPath, csv, new UTF8Encoding(true));
-                }
-                else if (detectedExtension == "ofx" && targetFormat == "XLSX")
-                {
-                    string ofxContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string csv = OfxParser.ToCsv(ofxContent);
-                    var rows = CsvToOfxConverter.ParseCsv(csv, ';');
-                    SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
-                }
-                else if (detectedExtension == "ofx" && targetFormat == "TXT")
-                {
-                    string ofxContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string txt = OfxParser.ToTxt(ofxContent);
-                    File.WriteAllText(outputPath, txt, Encoding.UTF8);
-                }
-                else if (detectedExtension == "ofx" && targetFormat == "PDF")
-                {
-                    string ofxContent = CsvToOfxConverter.ReadAllTextAuto(selectedFilePath);
-                    string csv = OfxParser.ToCsv(ofxContent);
-                    SimplePdfWriter.WriteCsvToPdf(csv, outputPath, baseName);
-                }
-                else if ((detectedExtension == "xlsx" || detectedExtension == "xls") && targetFormat == "OFX")
-                {
-                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
-                    string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
-                    string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csv, banco, agencia, conta);
-                    File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
-                }
-                else if ((detectedExtension == "xlsx" || detectedExtension == "xls") && targetFormat == "CSV")
-                {
-                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
-                    string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
-                    File.WriteAllText(outputPath, csv, new UTF8Encoding(true));
-                }
-                else if ((detectedExtension == "xlsx" || detectedExtension == "xls") && targetFormat == "TXT")
-                {
-                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
-                    string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
-                    string txt = TableFormatter.CsvToAlignedTxt(csv);
-                    File.WriteAllText(outputPath, txt, Encoding.UTF8);
-                }
-                else if ((detectedExtension == "xlsx" || detectedExtension == "xls") && targetFormat == "PDF")
-                {
-                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(selectedFilePath);
-                    string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
-                    SimplePdfWriter.WriteCsvToPdf(csv, outputPath, baseName);
-                }
-                else
-                {
-                    File.Copy(selectedFilePath, outputPath, true);
-                }
+                    return ExecuteConversion(srcPath, fmt, ext, docDir, banco, agencia, conta, filial, tipoDoc, contaCaixa, formaPgto);
+                });
 
                 lastSavedPath = outputPath;
                 resultPathText.Text = outputPath;
@@ -2036,7 +2012,190 @@ namespace ConvertFlow
             {
                 convertButton.IsEnabled = true;
                 convertButton.Content = "CONVERTER ARQUIVO";
+                convertButton.Cursor = Cursors.Hand;
             }
+        }
+
+        private string ExecuteConversion(
+            string srcPath,
+            string targetFmt,
+            string detectedExt,
+            string outDir,
+            string banco,
+            string agencia,
+            string conta,
+            string filial,
+            string tipoDoc,
+            string contaCaixa,
+            string formaPgto)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(srcPath);
+            string timeTag = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string outExt = targetFmt.ToLower();
+            string outputFileName;
+            if (targetFmt == "BAIXA")
+            {
+                outputFileName = string.Format("BAIXA_{0}_{1}.txt", baseName, timeTag);
+            }
+            else
+            {
+                outputFileName = string.Format("{0}_convertido_{1}.{2}", baseName, timeTag, outExt);
+            }
+            string outputPath = Path.Combine(outDir, outputFileName);
+
+            if (targetFmt == "BAIXA")
+            {
+                string baixaContent = "";
+                if (detectedExt == "xlsx" || detectedExt == "xls")
+                {
+                    var rows = SimpleXlsxReader.ReadRowsFromXlsx(srcPath);
+                    baixaContent = CnabToBaixaConverter.ConvertTableToBaixa(rows, filial, tipoDoc, contaCaixa, formaPgto);
+                }
+                else
+                {
+                    string rawText = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                    baixaContent = CnabToBaixaConverter.ConvertToBaixa(rawText, filial, tipoDoc, contaCaixa, formaPgto);
+                }
+                File.WriteAllText(outputPath, baixaContent, Encoding.GetEncoding(1252));
+            }
+            else if ((detectedExt == "csv" || detectedExt == "txt" || detectedExt == "ret" || detectedExt == "rem") && targetFmt == "OFX")
+            {
+                string csvContent = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csvContent, banco, agencia, conta);
+                File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
+            }
+            else if ((detectedExt == "csv" || detectedExt == "txt" || detectedExt == "ret" || detectedExt == "rem") && targetFmt == "XLSX")
+            {
+                string rawText = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                List<string> lines = new List<string>();
+                foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                List<List<string>> rows;
+                if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                {
+                    rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                }
+                else
+                {
+                    char delim = CsvToOfxConverter.DetectDelimiter(rawText);
+                    rows = CsvToOfxConverter.ParseCsv(rawText, delim);
+                }
+                SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
+            }
+            else if ((detectedExt == "csv" || detectedExt == "txt" || detectedExt == "ret" || detectedExt == "rem") && targetFmt == "CSV")
+            {
+                string rawText = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                List<string> lines = new List<string>();
+                foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                {
+                    var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                    string csvOut = SimpleXlsxReader.RowsToCsv(rows, ";");
+                    File.WriteAllText(outputPath, csvOut, new UTF8Encoding(true));
+                }
+                else
+                {
+                    File.WriteAllText(outputPath, rawText, new UTF8Encoding(true));
+                }
+            }
+            else if ((detectedExt == "csv" || detectedExt == "txt" || detectedExt == "ret" || detectedExt == "rem") && targetFmt == "TXT")
+            {
+                string rawText = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                List<string> lines = new List<string>();
+                foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                string txt;
+                if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                {
+                    var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                    string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
+                    txt = TableFormatter.CsvToAlignedTxt(csvTemp);
+                }
+                else
+                {
+                    txt = TableFormatter.CsvToAlignedTxt(rawText);
+                }
+                File.WriteAllText(outputPath, txt, Encoding.UTF8);
+            }
+            else if ((detectedExt == "csv" || detectedExt == "txt" || detectedExt == "ret" || detectedExt == "rem") && targetFmt == "PDF")
+            {
+                string rawText = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string[] rawLines = rawText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                List<string> lines = new List<string>();
+                foreach (string l in rawLines) { string t = l.TrimEnd(); if (!string.IsNullOrEmpty(t)) lines.Add(t); }
+
+                if (CnabToBaixaConverter.IsBaixaRmLayout(lines))
+                {
+                    var rows = CnabToBaixaConverter.ParseBaixaRmToRows(lines);
+                    string csvTemp = SimpleXlsxReader.RowsToCsv(rows, ";");
+                    SimplePdfWriter.WriteCsvToPdf(csvTemp, outputPath, baseName);
+                }
+                else
+                {
+                    SimplePdfWriter.WriteCsvToPdf(rawText, outputPath, baseName);
+                }
+            }
+            else if (detectedExt == "ofx" && targetFmt == "CSV")
+            {
+                string ofxContent = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string csv = OfxParser.ToCsv(ofxContent);
+                File.WriteAllText(outputPath, csv, new UTF8Encoding(true));
+            }
+            else if (detectedExt == "ofx" && targetFmt == "XLSX")
+            {
+                string ofxContent = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string csv = OfxParser.ToCsv(ofxContent);
+                var rows = CsvToOfxConverter.ParseCsv(csv, ';');
+                SimpleXlsxWriter.WriteRowsToXlsx(rows, outputPath);
+            }
+            else if (detectedExt == "ofx" && targetFmt == "TXT")
+            {
+                string ofxContent = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string txt = OfxParser.ToTxt(ofxContent);
+                File.WriteAllText(outputPath, txt, Encoding.UTF8);
+            }
+            else if (detectedExt == "ofx" && targetFmt == "PDF")
+            {
+                string ofxContent = CsvToOfxConverter.ReadAllTextAuto(srcPath);
+                string csv = OfxParser.ToCsv(ofxContent);
+                SimplePdfWriter.WriteCsvToPdf(csv, outputPath, baseName);
+            }
+            else if ((detectedExt == "xlsx" || detectedExt == "xls") && targetFmt == "OFX")
+            {
+                var rows = SimpleXlsxReader.ReadRowsFromXlsx(srcPath);
+                string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
+                string ofx = CsvToOfxConverter.ConvertToTotvsOfx(csv, banco, agencia, conta);
+                File.WriteAllText(outputPath, ofx, Encoding.GetEncoding(1252));
+            }
+            else if ((detectedExt == "xlsx" || detectedExt == "xls") && targetFmt == "CSV")
+            {
+                var rows = SimpleXlsxReader.ReadRowsFromXlsx(srcPath);
+                string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
+                File.WriteAllText(outputPath, csv, new UTF8Encoding(true));
+            }
+            else if ((detectedExt == "xlsx" || detectedExt == "xls") && targetFmt == "TXT")
+            {
+                var rows = SimpleXlsxReader.ReadRowsFromXlsx(srcPath);
+                string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
+                string txt = TableFormatter.CsvToAlignedTxt(csv);
+                File.WriteAllText(outputPath, txt, Encoding.UTF8);
+            }
+            else if ((detectedExt == "xlsx" || detectedExt == "xls") && targetFmt == "PDF")
+            {
+                var rows = SimpleXlsxReader.ReadRowsFromXlsx(srcPath);
+                string csv = SimpleXlsxReader.RowsToCsv(rows, ";");
+                SimplePdfWriter.WriteCsvToPdf(csv, outputPath, baseName);
+            }
+            else
+            {
+                File.Copy(srcPath, outputPath, true);
+            }
+
+            return outputPath;
         }
     }
 
@@ -2982,6 +3141,12 @@ namespace ConvertFlow
 
             string upper = raw.ToUpperInvariant();
 
+            // Folha de Pagamento -> 166
+            if (upper.Contains("FOLHA") || upper.Contains("SALAR") || upper == "FP")
+            {
+                return "166";
+            }
+
             // Retorno Bancário / Boleto / Cobrança / Banco / PIX -> 3
             if (upper.Contains("RETORNO") ||
                 upper.Contains("BANC") ||
@@ -3039,6 +3204,7 @@ namespace ConvertFlow
             string id = NormalizeIdFormaPgto(idOrName);
             switch (id)
             {
+                case "166": return "Folha de Pagamento";
                 case "3": return "Retorno Bancário";
                 case "12": return "DEPÓSITO";
                 case "1": return "DINHEIRO";
@@ -3051,7 +3217,7 @@ namespace ConvertFlow
             }
         }
 
-        public static string ProcessBaixaRmFile(List<string> lines, string fallbackFilial, string fallbackTipoDoc, string fallbackContaCaixa, string fallbackFormaPgto)
+        public static string ProcessBaixaRmFile(List<string> lines, string fallbackFilial, string fallbackTipoDoc, string fallbackContaCaixa, string fallbackFormaPgto, SqlConnection conn = null)
         {
             List<string> resultLines = new List<string>();
             foreach (string l in lines)
@@ -3080,7 +3246,7 @@ namespace ConvertFlow
                     decimal vlrMulta = ParseBaixaDecimal(vlrMultaStr);
 
                     // Consulta automática ao banco TOTVS RM na tabela FLAN
-                    var flan = TotvsDbService.QueryLancamento(numDoc, clifor, hist, vlrBx);
+                    var flan = TotvsDbService.QueryLancamento(numDoc, clifor, hist, vlrBx, conn);
                     if (flan.Found)
                     {
                         if (!string.IsNullOrEmpty(flan.CodTipoDoc)) td = flan.CodTipoDoc;
@@ -3088,6 +3254,7 @@ namespace ConvertFlow
                         if (!string.IsNullOrEmpty(flan.CodFilial)) fil = flan.CodFilial;
                         if (!string.IsNullOrEmpty(flan.CodConta)) cc = flan.CodConta;
                         if (!string.IsNullOrEmpty(flan.CodCfo)) clifor = flan.CodCfo;
+                        if (!string.IsNullOrEmpty(existingIdLan)) numDoc = existingIdLan;
                     }
                     else
                     {
@@ -3209,53 +3376,56 @@ namespace ConvertFlow
 
             if (lines.Count == 0) return "";
 
-            // 0. Verifica se o arquivo já é um layout de Baixa TOTVS RM (Linha L, >= 900 posições)
-            if (IsBaixaRmLayout(lines))
+            using (SqlConnection conn = TotvsDbService.OpenConnection())
             {
-                return ProcessBaixaRmFile(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
-            }
-
-            // 1. Tenta CNAB 240 (Segmentos A+B ou T+U)
-            bool isCnab240 = false;
-            foreach (string l in lines)
-            {
-                if (l.Length >= 14 && l.Substring(7, 1) == "3")
+                // 0. Verifica se o arquivo já é um layout de Baixa TOTVS RM (Linha L, >= 900 posições)
+                if (IsBaixaRmLayout(lines))
                 {
-                    isCnab240 = true;
-                    break;
+                    return ProcessBaixaRmFile(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, conn);
                 }
-            }
 
-            if (isCnab240)
-            {
-                string res = ConvertCnab240(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
-                if (!string.IsNullOrEmpty(res)) return res;
-            }
-
-            // 2. Tenta CNAB 400 (Linha detalhe inicia com '1' e comprimento >= 400)
-            bool isCnab400 = false;
-            foreach (string l in lines)
-            {
-                if (l.Length >= 400 && l.StartsWith("1"))
+                // 1. Tenta CNAB 240 (Segmentos A+B ou T+U)
+                bool isCnab240 = false;
+                foreach (string l in lines)
                 {
-                    isCnab400 = true;
-                    break;
+                    if (l.Length >= 14 && l.Substring(7, 1) == "3")
+                    {
+                        isCnab240 = true;
+                        break;
+                    }
                 }
-            }
 
-            if (isCnab400)
-            {
-                string res = ConvertCnab400(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
-                if (!string.IsNullOrEmpty(res)) return res;
-            }
+                if (isCnab240)
+                {
+                    string res = ConvertCnab240(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, conn);
+                    if (!string.IsNullOrEmpty(res)) return res;
+                }
 
-            // 3. Fallback: Arquivo delimitado tabular (CSV / TXT)
-            char delim = CsvToOfxConverter.DetectDelimiter(rawText);
-            List<List<string>> rows = CsvToOfxConverter.ParseCsv(rawText, delim);
-            return ConvertTableToBaixa(rows, codFilial, codTipoDoc, codContaCaixa, idFormaPgto);
+                // 2. Tenta CNAB 400 (Linha detalhe inicia com '1' e comprimento >= 400)
+                bool isCnab400 = false;
+                foreach (string l in lines)
+                {
+                    if (l.Length >= 400 && l.StartsWith("1"))
+                    {
+                        isCnab400 = true;
+                        break;
+                    }
+                }
+
+                if (isCnab400)
+                {
+                    string res = ConvertCnab400(lines, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, conn);
+                    if (!string.IsNullOrEmpty(res)) return res;
+                }
+
+                // 3. Fallback: Arquivo delimitado tabular (CSV / TXT)
+                char delim = CsvToOfxConverter.DetectDelimiter(rawText);
+                List<List<string>> rows = CsvToOfxConverter.ParseCsv(rawText, delim);
+                return ConvertTableToBaixa(rows, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, conn);
+            }
         }
 
-        private static string ConvertCnab240(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        private static string ConvertCnab240(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, SqlConnection conn = null)
         {
             List<string> resultLines = new List<string>();
 
@@ -3291,7 +3461,7 @@ namespace ConvertFlow
                 }
             }
 
-            var cxaRes = TotvsDbService.ResolveContaCaixa(cnabBanco, cnabAg, cnabConta, cnabNomeBanco);
+            var cxaRes = TotvsDbService.ResolveContaCaixa(cnabBanco, cnabAg, cnabConta, cnabNomeBanco, conn);
             string effectiveContaCaixa = !string.IsNullOrEmpty(cxaRes.CodCxa) ? cxaRes.CodCxa : (string.IsNullOrEmpty(codContaCaixa) || codContaCaixa == "1" ? "30" : codContaCaixa);
             string effectiveNomeBanco = !string.IsNullOrEmpty(cxaRes.NomeBanco) ? cxaRes.NomeBanco : cnabNomeBanco;
             if (string.IsNullOrEmpty(effectiveNomeBanco))
@@ -3314,7 +3484,7 @@ namespace ConvertFlow
                     }
                     else if (seg == "B" && curA != null)
                     {
-                        string lineBx = BuildFromSegmentAB(curA, l, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco);
+                        string lineBx = BuildFromSegmentAB(curA, l, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco, conn);
                         resultLines.Add(lineBx);
                         curA = null;
                     }
@@ -3337,7 +3507,7 @@ namespace ConvertFlow
                         }
                         else if (seg == "U" && curT != null)
                         {
-                            string lineBx = BuildFromSegmentTU(curT, l, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco);
+                            string lineBx = BuildFromSegmentTU(curT, l, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco, conn);
                             resultLines.Add(lineBx);
                             curT = null;
                         }
@@ -3353,7 +3523,7 @@ namespace ConvertFlow
                     string l = lines[i];
                     if (l.Length >= 14 && l.Substring(7, 1) == "3" && l.Substring(13, 1) == "A")
                     {
-                        string lineBx = BuildFromSegmentAB(l, null, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco);
+                        string lineBx = BuildFromSegmentAB(l, null, codFilial, effectiveTipoDoc, effectiveContaCaixa, idFormaPgto, effectiveNomeBanco, conn);
                         resultLines.Add(lineBx);
                     }
                 }
@@ -3363,7 +3533,7 @@ namespace ConvertFlow
             return string.Join("\r\n", resultLines.ToArray()) + "\r\n";
         }
 
-        private static string BuildFromSegmentAB(string segA, string segB, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, string bancoNome)
+        private static string BuildFromSegmentAB(string segA, string segB, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, string bancoNome, SqlConnection conn = null)
         {
             // Segmento A: Dados do favorecido, documento, data e valor
             string numDoc = segA.Length >= 93 ? segA.Substring(73, Math.Min(20, segA.Length - 73)).Trim() : "";
@@ -3426,10 +3596,19 @@ namespace ConvertFlow
             }
 
             // Realiza consulta automática ao banco TOTVS RM na tabela FLAN com prioridade STATUSLAN = 0
-            var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, favorecido, vlrReal);
+            // No CNAB de Pagamento a Fornecedores/Folha (Segmento A/B), o Nosso Número identifica com exatidão o lote de pagamento/IDLAN (ex: 11961393 -> IDLAN 961393)
+            FlanResult flan = new FlanResult();
+            if (!string.IsNullOrEmpty(nossoNum) && nossoNum.TrimStart('0').Length >= 6)
+            {
+                flan = TotvsDbService.QueryLancamento(nossoNum, "", "", 0m, conn);
+            }
+            if (!flan.Found)
+            {
+                flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, favorecido, vlrReal, conn);
+            }
             if (!flan.Found && !string.IsNullOrEmpty(nossoNum))
             {
-                flan = TotvsDbService.QueryLancamento(nossoNum, "", "", vlrReal);
+                flan = TotvsDbService.QueryLancamento(nossoNum, "", "", vlrReal, conn);
             }
 
             string defaultTipoDoc = (!string.IsNullOrEmpty(codTipoDoc) && codTipoDoc != "ICOP" && codTipoDoc != "CRMD") ? codTipoDoc : "SALP";
@@ -3440,22 +3619,26 @@ namespace ConvertFlow
                 : (!string.IsNullOrEmpty(bancoNome) ? bancoNome : (!string.IsNullOrEmpty(cpfCnpj) ? cpfCnpj : favorecido));
             string finalCliFor = (flan.Found && !string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : defaultCliFor;
             string finalContaCaixa = !string.IsNullOrEmpty(codContaCaixa) ? codContaCaixa : (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : "30";
-            string finalNumDoc = (flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc;
-            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : finalNumDoc;
             string idLan = flan.Found ? flan.IdLan : "";
+            string finalNumDoc = !string.IsNullOrEmpty(idLan) ? idLan : ((flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc);
+            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : (!string.IsNullOrEmpty(flan.NumeroDocumento) ? flan.NumeroDocumento : finalNumDoc);
             if (vlrReal == 0m && flan.Found && flan.ValorOriginal > 0m)
             {
                 vlrReal = flan.ValorOriginal;
             }
 
             string numFp = NormalizeIdFormaPgto(idFormaPgto);
-            if (string.IsNullOrEmpty(numFp) || numFp == "12")
+            if (numFp == "3" && (finalTipoDoc == "SALP" || finalTipoDoc == "ESTR"))
             {
-                numFp = "3";
+                numFp = "166";
+            }
+            else if (string.IsNullOrEmpty(numFp) || numFp == "12")
+            {
+                numFp = (finalTipoDoc == "SALP" || finalTipoDoc == "ESTR") ? "166" : "3";
             }
 
             // Consulta nome do funcionário no banco TOTVS RM (PFUNC) com base na chapa contida no número do documento
-            string nomeFunc = TotvsDbService.QueryFuncionarioByChapa(numDoc, cpfCnpj);
+            string nomeFunc = TotvsDbService.QueryFuncionarioByChapa(numDoc, cpfCnpj, conn);
             if (string.IsNullOrEmpty(nomeFunc))
             {
                 nomeFunc = favorecido;
@@ -3485,7 +3668,7 @@ namespace ConvertFlow
             );
         }
 
-        private static string BuildFromSegmentTU(string segT, string segU, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, string bancoNome)
+        private static string BuildFromSegmentTU(string segT, string segU, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, string bancoNome, SqlConnection conn = null)
         {
             // Segmento T: Nosso Número e Valor Nominal
             string numDoc = "";
@@ -3539,7 +3722,7 @@ namespace ConvertFlow
             }
 
             // Consulta automática ao banco TOTVS RM na tabela FLAN com prioridade STATUSLAN = 0
-            var flan = TotvsDbService.QueryLancamento(numDoc, "", vlrPago);
+            var flan = TotvsDbService.QueryLancamento(numDoc, "", vlrPago, conn);
 
             string defaultTipoDoc = (!string.IsNullOrEmpty(codTipoDoc) && codTipoDoc != "ICOP" && codTipoDoc != "CRMD") ? codTipoDoc : "SALP";
             string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : defaultTipoDoc;
@@ -3549,9 +3732,9 @@ namespace ConvertFlow
                 : (!string.IsNullOrEmpty(bancoNome) ? bancoNome : "");
             string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : defaultCliFor;
             string finalContaCaixa = !string.IsNullOrEmpty(codContaCaixa) ? codContaCaixa : (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : "30";
-            string finalNumDoc = (flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc;
-            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : finalNumDoc;
             string idLan = flan.Found ? flan.IdLan : "";
+            string finalNumDoc = !string.IsNullOrEmpty(idLan) ? idLan : ((flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc);
+            string histDoc = !string.IsNullOrEmpty(numDoc) ? numDoc : (!string.IsNullOrEmpty(flan.NumeroDocumento) ? flan.NumeroDocumento : finalNumDoc);
 
             string numFp = NormalizeIdFormaPgto(idFormaPgto);
             if (string.IsNullOrEmpty(numFp) || numFp == "12")
@@ -3559,7 +3742,7 @@ namespace ConvertFlow
                 numFp = "3";
             }
 
-            string nomeFuncTU = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+            string nomeFuncTU = TotvsDbService.QueryFuncionarioByChapa(numDoc, "", conn);
             string compTU = TotvsDbService.ResolveCompetencia(flan.Competencia, numDoc, dtBaixa6);
 
             return BuildBaixaLine(
@@ -3584,7 +3767,7 @@ namespace ConvertFlow
             );
         }
 
-        private static string ConvertCnab400(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
+        private static string ConvertCnab400(List<string> lines, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, SqlConnection conn = null)
         {
             List<string> resultLines = new List<string>();
 
@@ -3606,7 +3789,7 @@ namespace ConvertFlow
                 }
             }
 
-            var cxaRes = TotvsDbService.ResolveContaCaixa(cnabBanco, cnabAg, cnabConta, cnabNome);
+            var cxaRes = TotvsDbService.ResolveContaCaixa(cnabBanco, cnabAg, cnabConta, cnabNome, conn);
             string effectiveContaCaixa = !string.IsNullOrEmpty(cxaRes.CodCxa) ? cxaRes.CodCxa : (string.IsNullOrEmpty(codContaCaixa) || codContaCaixa == "1" ? "30" : codContaCaixa);
             string effectiveNomeBanco = !string.IsNullOrEmpty(cxaRes.NomeBanco) ? cxaRes.NomeBanco : cnabNome;
             if (string.IsNullOrEmpty(effectiveNomeBanco))
@@ -3627,7 +3810,7 @@ namespace ConvertFlow
                     decimal vlrPago = l.Length >= 165 ? ParseMoneyCents(l.Substring(152, 13)) : 0m;
                     string cpfCnpj = l.Length >= 232 ? l.Substring(218, 14).Trim() : "";
 
-                    var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, vlrPago);
+                    var flan = TotvsDbService.QueryLancamento(numDoc, cpfCnpj, vlrPago, conn);
 
                     string finalTipoDoc = (flan.Found && !string.IsNullOrEmpty(flan.CodTipoDoc)) ? flan.CodTipoDoc : effectiveTipoDoc;
                     string finalFilial = (flan.Found && !string.IsNullOrEmpty(flan.CodFilial)) ? flan.CodFilial : codFilial;
@@ -3637,6 +3820,7 @@ namespace ConvertFlow
                     string finalCliFor = (!string.IsNullOrEmpty(flan.CodCfo)) ? flan.CodCfo : defaultCliFor;
                     string finalContaCaixa = !string.IsNullOrEmpty(effectiveContaCaixa) ? effectiveContaCaixa : (flan.Found && !string.IsNullOrEmpty(flan.CodConta)) ? flan.CodConta : "30";
                     string idLan = flan.Found ? flan.IdLan : "";
+                    string finalNumDoc = !string.IsNullOrEmpty(idLan) ? idLan : ((flan.Found && !string.IsNullOrEmpty(flan.NumeroDocumento)) ? flan.NumeroDocumento : numDoc);
 
                     string numFp = NormalizeIdFormaPgto(idFormaPgto);
                     if (string.IsNullOrEmpty(numFp) || numFp == "12")
@@ -3644,14 +3828,14 @@ namespace ConvertFlow
                         numFp = "3";
                     }
 
-                    string nomeFunc400 = TotvsDbService.QueryFuncionarioByChapa(numDoc, "");
+                    string nomeFunc400 = TotvsDbService.QueryFuncionarioByChapa(numDoc, "", conn);
                     string comp400 = TotvsDbService.ResolveCompetencia(flan.Competencia, numDoc, dtOcorr);
 
                     string lineBx = BuildBaixaLine(
                         finalFilial,
                         finalCliFor,
                         finalTipoDoc,
-                        numDoc,
+                        finalNumDoc,
                         dtOcorr,
                         vlrPago,
                         0m,
@@ -3663,7 +3847,7 @@ namespace ConvertFlow
                         GetFormaPgtoNome(numFp),
                         idLan,
                         effectiveNomeBanco,
-                        null,
+                        numDoc,
                         nomeFunc400,
                         comp400
                     );
@@ -3676,7 +3860,19 @@ namespace ConvertFlow
 
         public static string ConvertTableToBaixa(List<List<string>> rows, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto)
         {
+            return ConvertTableToBaixa(rows, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, null);
+        }
+
+        public static string ConvertTableToBaixa(List<List<string>> rows, string codFilial, string codTipoDoc, string codContaCaixa, string idFormaPgto, SqlConnection conn)
+        {
             if (rows == null || rows.Count == 0) return "";
+            if (conn == null)
+            {
+                using (SqlConnection c = TotvsDbService.OpenConnection())
+                {
+                    return ConvertTableToBaixa(rows, codFilial, codTipoDoc, codContaCaixa, idFormaPgto, c);
+                }
+            }
 
             List<string> headers = rows[0];
             int dateCol = -1, descCol = -1, amountCol = -1, docCol = -1, cpfCol = -1;
@@ -3819,7 +4015,7 @@ namespace ConvertFlow
                     rawDoc = r.ToString();
                 }
 
-                var flan = TotvsDbService.QueryLancamento(rawDoc, rawCpf, rawDesc, val);
+                var flan = TotvsDbService.QueryLancamento(rawDoc, rawCpf, rawDesc, val, conn);
                 if (flan.Found)
                 {
                     if (string.IsNullOrEmpty(rowTd) && !string.IsNullOrEmpty(flan.CodTipoDoc)) rowTd = flan.CodTipoDoc;
@@ -3838,7 +4034,7 @@ namespace ConvertFlow
                 string nomeFuncTable = rowNome;
                 if (string.IsNullOrEmpty(nomeFuncTable))
                 {
-                    nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf);
+                    nomeFuncTable = TotvsDbService.QueryFuncionarioByChapa(rawDoc, rawCpf, conn);
                 }
                 if (string.IsNullOrEmpty(nomeFuncTable))
                 {
@@ -3881,11 +4077,14 @@ namespace ConvertFlow
                     bancoNome = "SICOOB";
                 }
 
+                string effIdLan = !string.IsNullOrEmpty(rawIdLan) ? rawIdLan : (flan.Found ? flan.IdLan : "");
+                string finalDoc = !string.IsNullOrEmpty(effIdLan) ? effIdLan : (!string.IsNullOrEmpty(flan.NumeroDocumento) ? flan.NumeroDocumento : rawDoc);
+
                 string lineBx = BuildBaixaLine(
                     rowFil,
                     rawCpf,
                     rowTd,
-                    rawDoc,
+                    finalDoc,
                     dtBaixa6,
                     val,
                     0m,
@@ -3895,7 +4094,7 @@ namespace ConvertFlow
                     "",
                     rowFp,
                     GetFormaPgtoNome(rowFp),
-                    rawIdLan,
+                    effIdLan,
                     bancoNome,
                     rawDoc,
                     nomeFuncTable,
@@ -3945,7 +4144,8 @@ namespace ConvertFlow
             string f_cod_filial = (codFilial ?? "0001").PadLeft(4, '0').Substring(0, 4);
             string f_cod_clifor = (codCliFor ?? "").PadRight(25, ' ').Substring(0, 25);
             string f_cod_tipo_doc = (codTipoDoc ?? "SALP").PadRight(10, ' ').Substring(0, 10);
-            string f_num_doc = (numDoc ?? "").PadRight(40, ' ').Substring(0, 40);
+            string effectiveDoc = !string.IsNullOrEmpty(idLan) ? idLan : numDoc;
+            string f_num_doc = (effectiveDoc ?? "").PadRight(40, ' ').Substring(0, 40);
             string f_dt_baixa = (dtBaixa6 ?? "").PadRight(6, ' ').Substring(0, 6);
             string f_vlr_bx = FormatMoney(vlrBaixado);
             string f_vlr_jr = FormatMoney(vlrJuros);
@@ -4040,6 +4240,10 @@ namespace ConvertFlow
             CultureInfo ptBr = new CultureInfo("pt-BR");
             string vlrStr = vlrBaixado.ToString("N2", ptBr);
             string nomeFp = !string.IsNullOrEmpty(formaPgtoNome) ? formaPgtoNome : GetFormaPgtoNome(idFormaPgto);
+            if (idFormaPgto == "166" || codTipoDoc == "SALP" || codTipoDoc == "ESTR")
+            {
+                nomeFp = "Folha de Pagamento";
+            }
             string docForHist = !string.IsNullOrEmpty(histDoc) ? histDoc : numDoc;
             string histText = string.Format("Baixa Filial: 1 - Forma de Pagamento: {0} - Valor: R${1} - Número do Documento: {2}",
                 nomeFp,
@@ -4053,26 +4257,23 @@ namespace ConvertFlow
                 histText += " - Competência: " + compEfetiva;
             }
 
-            string favEfetivo = !string.IsNullOrEmpty(bancoNome) ? bancoNome : favorecidoNome;
-            string funcEfetivo = !string.IsNullOrEmpty(funcionarioNome) ? funcionarioNome : favorecidoNome;
-
-            if (!string.IsNullOrEmpty(favEfetivo))
+            // Favorecido: apenas o nome do favorecido/funcionário, sem "SICOOB"
+            string nomeFav = !string.IsNullOrEmpty(funcionarioNome) ? funcionarioNome : favorecidoNome;
+            if (string.IsNullOrEmpty(nomeFav)) nomeFav = bancoNome;
+            if (!string.IsNullOrEmpty(nomeFav))
             {
-                if (!string.IsNullOrEmpty(funcEfetivo) && !favEfetivo.Equals(funcEfetivo, StringComparison.OrdinalIgnoreCase))
+                if (nomeFav.StartsWith("SICOOB - ", StringComparison.OrdinalIgnoreCase))
                 {
-                    histText += string.Format(" - Favorecido: {0} - {1}", favEfetivo, funcEfetivo);
+                    nomeFav = nomeFav.Substring(9).Trim();
                 }
-                else
+                else if (nomeFav.StartsWith("SICOOB ", StringComparison.OrdinalIgnoreCase))
                 {
-                    histText += " - Favorecido: " + favEfetivo;
+                    nomeFav = nomeFav.Substring(7).Trim();
                 }
-            }
-            else if (!string.IsNullOrEmpty(funcEfetivo))
-            {
-                histText += " - Favorecido: " + funcEfetivo;
+                histText += " - Favorecido: " + nomeFav;
             }
 
-            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, "");
+            return BuildBaixaLineDirect(codFilial, codCliFor, codTipoDoc, numDoc, dtBaixa6, vlrBaixado, vlrJuros, vlrDesconto, vlrMulta, codContaCaixa, histText, idFormaPgto, idLan);
         }
 
         public static string BuildBaixaLine(
